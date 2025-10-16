@@ -22,7 +22,6 @@ class AuthService {
   Future<void> signOut() => _auth.signOut();
 
   Future<String?> getIdToken() async {
-    final user = _auth.currentUser;
-    return user != null ? user.getIdToken() : null;
+    return _auth.currentUser?.getIdToken();
   }
 }

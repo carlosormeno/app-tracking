@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../models/location_point.dart';
@@ -19,10 +20,15 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
+  static const int _trackingStartHour = 8; // Inicio permitido (08:00 local)
+  static const int _trackingEndHour = 18; // Fin permitido (17:00 local)
+
   final LocationService _locationService = LocationService();
   final ApiService _apiService = ApiService();
-  late final LocationSyncManager _syncManager =
-      LocationSyncManager(apiService: _apiService);
+  late final LocationSyncManager _syncManager = LocationSyncManager(
+    apiService: _apiService,
+  );
+  final MapController _mapController = MapController();
   final List<LatLng> _route = [];
   bool _isLoading = true;
   bool _isTracking = false;
@@ -34,6 +40,9 @@ class _MapScreenState extends State<MapScreen> {
   DateTimeRange? _lastHistoryRange;
   List<LocationPoint> _lastHistoryPoints = [];
   LatLng _center = const LatLng(-12.0464, -77.0428); // Lima por defecto
+  bool _mapReady = false;
+  bool _outsideScheduleHandled = false;
+  String? _shutdownMessage;
   StreamSubscription<LocationPoint>? _locationStreamSub;
 
   @override
@@ -42,11 +51,12 @@ class _MapScreenState extends State<MapScreen> {
     logDebug('MapScreen initState');
     _bootstrap();
     _locationStreamSub = _locationService.stream.listen((LocationPoint p) {
+      final point = LatLng(p.latitude, p.longitude);
       setState(() {
-        final point = LatLng(p.latitude, p.longitude);
         _route.add(point);
         _center = point;
       });
+      _moveCameraTo(point);
       _syncLocation(p);
     });
   }
@@ -54,6 +64,15 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _bootstrap() async {
     logDebug('MapScreen bootstrap iniciado');
     try {
+      if (mounted) {
+        setState(() {
+          _shutdownMessage = null;
+          _outsideScheduleHandled = false;
+        });
+      } else {
+        _shutdownMessage = null;
+        _outsideScheduleHandled = false;
+      }
       final identity = IdentityService();
       final uid = identity.uid;
       final email = identity.email;
@@ -70,16 +89,23 @@ class _MapScreenState extends State<MapScreen> {
         _firebaseUid = uid;
         _email = email;
       });
-      await _ensureBackendReady();
+      final ready = await _ensureBackendReady();
+      if (!ready) return;
+      if (!_isWithinTrackingWindow(DateTime.now())) {
+        _handleOutsideTrackingHours();
+        return;
+      }
       final p = await _locationService.getCurrentOnce();
       if (p != null) {
         setState(() {
           _center = LatLng(p.latitude, p.longitude);
         });
+        _moveCameraTo(_center);
       }
       _route.clear();
       _showingHistory = false;
       _lastHistoryPoints = [];
+      await _startTracking(ensureBackend: false);
     } catch (e) {
       _showError('Error inicializando: $e');
     } finally {
@@ -90,27 +116,89 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  Future<void> _toggleTracking() async {
-    if (_isTracking) {
-      logDebug('El usuario detuvo el tracking');
-      await _locationService.stop();
-      setState(() => _isTracking = false);
-    } else {
-      try {
-        logDebug('El usuario inició el tracking');
+  void _moveCameraTo(LatLng target) {
+    if (!_mapReady) return;
+    try {
+      final zoom = _mapController.camera.zoom;
+      _mapController.move(target, zoom);
+    } catch (error, stackTrace) {
+      logError(
+        'No se pudo mover la cámara del mapa',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _startTracking({bool ensureBackend = true}) async {
+    if (_isTracking) return;
+    if (!_isWithinTrackingWindow(DateTime.now())) {
+      _handleOutsideTrackingHours();
+      return;
+    }
+    try {
+      if (ensureBackend) {
         final ready = await _ensureBackendReady();
         if (!ready) return;
-        await _locationService.start();
+      }
+      logDebug('Tracking iniciado automáticamente');
+      await _locationService.start();
+      if (mounted) {
         setState(() => _isTracking = true);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error iniciando tracking: $e')),
-          );
-        }
+      } else {
+        _isTracking = true;
+      }
+    } catch (e) {
+      _showError('Error iniciando tracking: $e');
+      if (mounted) {
         setState(() => _showingHistory = false);
+      } else {
+        _showingHistory = false;
       }
     }
+  }
+
+  bool _isWithinTrackingWindow(DateTime timestamp) {
+    final start = DateTime(
+      timestamp.year,
+      timestamp.month,
+      timestamp.day,
+      _trackingStartHour,
+    );
+    final end = DateTime(
+      timestamp.year,
+      timestamp.month,
+      timestamp.day,
+      _trackingEndHour,
+    );
+    return !timestamp.isBefore(start) && !timestamp.isAfter(end);
+  }
+
+  String _trackingWindowLabel() =>
+      '${_trackingStartHour.toString().padLeft(2, '0')}:00 - ${_trackingEndHour.toString().padLeft(2, '0')}:00';
+
+  void _handleOutsideTrackingHours() {
+    if (_outsideScheduleHandled) return;
+    _outsideScheduleHandled = true;
+    final message =
+        'Esta aplicación está disponible entre ${_trackingWindowLabel()}. La aplicación se cerrará.';
+    unawaited(_locationService.stop());
+    if (mounted) {
+      setState(() {
+        _shutdownMessage = message;
+        _isTracking = false;
+        _isLoading = false;
+      });
+    } else {
+      _shutdownMessage = message;
+      _isTracking = false;
+      _isLoading = false;
+    }
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) {
+        SystemNavigator.pop();
+      }
+    });
   }
 
   Future<bool> _ensureBackendReady() async {
@@ -149,8 +237,11 @@ class _MapScreenState extends State<MapScreen> {
       try {
         await _syncManager.sendOrQueue(firebaseUid: uid, point: point);
       } catch (error, stackTrace) {
-        logError('Fallo al enviar ubicación, quedará en cola',
-            error: error, stackTrace: stackTrace);
+        logError(
+          'Fallo al enviar ubicación, quedará en cola',
+          error: error,
+          stackTrace: stackTrace,
+        );
         _showError('Ubicación almacenada localmente: $error');
       }
     }());
@@ -178,17 +269,27 @@ class _MapScreenState extends State<MapScreen> {
           _showingHistory = true;
           _route
             ..clear()
-            ..addAll(history.points
-                .map((p) => LatLng(p.latitude, p.longitude)));
+            ..addAll(
+              history.points.map((p) => LatLng(p.latitude, p.longitude)),
+            );
           if (_route.isNotEmpty) {
             _center = _route.last;
           }
           _lastDistanceKm = history.totalDistanceKm;
-          _lastHistoryRange = DateTimeRange(start: history.start, end: history.end);
+          _lastHistoryRange = DateTimeRange(
+            start: history.start,
+            end: history.end,
+          );
           _lastHistoryPoints = history.points;
         });
-        logDebug('Historial cargado',
-            details: 'puntos=${history.points.length} distancia=${history.totalDistanceKm}');
+        if (_route.isNotEmpty) {
+          _moveCameraTo(_route.last);
+        }
+        logDebug(
+          'Historial cargado',
+          details:
+              'puntos=${history.points.length} distancia=${history.totalDistanceKm}',
+        );
       }
     } catch (e) {
       _showError('No se pudo cargar historial: $e');
@@ -198,7 +299,7 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _tryFlushPending() async {
     try {
       await _syncManager.flushPending();
-    logDebug('Flush de ubicaciones pendientes finalizado');
+      logDebug('Flush de ubicaciones pendientes finalizado');
     } catch (e) {
       _showError('Quedan ubicaciones pendientes: $e');
     }
@@ -207,9 +308,9 @@ class _MapScreenState extends State<MapScreen> {
   void _showError(String message) {
     logError('Mostrando error al usuario', error: message);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _showHistoryDetails(BuildContext context) {
@@ -262,6 +363,7 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
+    _mapReady = false;
     _locationStreamSub?.cancel();
     if (_locationService.isTracking) {
       unawaited(_locationService.stop());
@@ -288,7 +390,9 @@ class _MapScreenState extends State<MapScreen> {
           ),
           IconButton(
             icon: Icon(_showingHistory ? Icons.clear : Icons.my_location),
-            tooltip: _showingHistory ? 'Limpiar historial' : 'Refrescar ubicación',
+            tooltip: _showingHistory
+                ? 'Limpiar historial'
+                : 'Refrescar ubicación',
             onPressed: () {
               if (_showingHistory) {
                 setState(() {
@@ -316,10 +420,7 @@ class _MapScreenState extends State<MapScreen> {
               }
             },
             itemBuilder: (context) => const [
-              PopupMenuItem(
-                value: 'logout',
-                child: Text('Cerrar sesión'),
-              ),
+              PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')),
             ],
           ),
         ],
@@ -327,9 +428,14 @@ class _MapScreenState extends State<MapScreen> {
       body: Stack(
         children: [
           FlutterMap(
+            mapController: _mapController,
             options: MapOptions(
               initialCenter: _center,
               initialZoom: 14,
+              onMapReady: () {
+                _mapReady = true;
+                _moveCameraTo(_center);
+              },
             ),
             children: [
               TileLayer(
@@ -339,7 +445,11 @@ class _MapScreenState extends State<MapScreen> {
               if (_route.length > 1)
                 PolylineLayer(
                   polylines: [
-                    Polyline(points: _route, color: Colors.blue, strokeWidth: 4),
+                    Polyline(
+                      points: _route,
+                      color: Colors.blue,
+                      strokeWidth: 4,
+                    ),
                   ],
                 ),
               if (_route.isNotEmpty)
@@ -349,13 +459,36 @@ class _MapScreenState extends State<MapScreen> {
                       point: _route.first,
                       width: 36,
                       height: 36,
-                      child: const Icon(Icons.location_on, color: Colors.green, size: 36),
+                      child: const Icon(
+                        Icons.location_on,
+                        color: Colors.green,
+                        size: 36,
+                      ),
                     ),
                     Marker(
                       point: _route.last,
                       width: 36,
                       height: 36,
-                      child: const Icon(Icons.location_on, color: Colors.red, size: 36),
+                      child: const Icon(
+                        Icons.location_on,
+                        color: Colors.red,
+                        size: 36,
+                      ),
+                    ),
+                  ],
+                ),
+              if (_route.isEmpty)
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: _center,
+                      width: 32,
+                      height: 32,
+                      child: const Icon(
+                        Icons.my_location,
+                        color: Colors.blue,
+                        size: 32,
+                      ),
                     ),
                   ],
                 ),
@@ -366,13 +499,21 @@ class _MapScreenState extends State<MapScreen> {
                       point: _route.first,
                       width: 40,
                       height: 40,
-                      child: const Icon(Icons.flag, color: Colors.orange, size: 40),
+                      child: const Icon(
+                        Icons.flag,
+                        color: Colors.orange,
+                        size: 40,
+                      ),
                     ),
                     Marker(
                       point: _route.last,
                       width: 40,
                       height: 40,
-                      child: const Icon(Icons.flag, color: Colors.purple, size: 40),
+                      child: const Icon(
+                        Icons.flag,
+                        color: Colors.purple,
+                        size: 40,
+                      ),
                     ),
                   ],
                 ),
@@ -399,33 +540,65 @@ class _MapScreenState extends State<MapScreen> {
                         'Distancia total: ${_lastDistanceKm.toStringAsFixed(2)} km',
                       ),
                       const SizedBox(height: 4),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Puntos: ${_route.length}'),
-              TextButton.icon(
-                onPressed: () {
-                  _showHistoryDetails(context);
-                },
-                icon: const Icon(Icons.list_alt),
-                label: const Text('Ver detalle'),
-              ),
-            ],
-          ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Puntos: ${_route.length}'),
+                          TextButton.icon(
+                            onPressed: () {
+                              _showHistoryDetails(context);
+                            },
+                            icon: const Icon(Icons.list_alt),
+                            label: const Text('Ver detalle'),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
               ),
             ),
-          if (_isLoading)
-            const Center(child: CircularProgressIndicator()),
+          if (_isLoading) const Center(child: CircularProgressIndicator()),
+          if (_shutdownMessage != null)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black54,
+                alignment: Alignment.center,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Card(
+                    margin: const EdgeInsets.all(24),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.error_outline,
+                            color: Colors.red,
+                            size: 48,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _shutdownMessage!,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _toggleTracking,
-        icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
-        label: Text(_isTracking ? 'Detener' : 'Iniciar'),
-        backgroundColor: _isTracking ? Colors.red : Colors.green,
+        onPressed: null,
+        icon: Icon(_isTracking ? Icons.location_on : Icons.hourglass_top),
+        label: Text(_isTracking ? 'Sistema activo' : 'Activando sistema...'),
+        backgroundColor: _isTracking ? Colors.green : Colors.blueGrey,
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );

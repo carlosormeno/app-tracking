@@ -112,7 +112,7 @@ class LocationTaskHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp, SendPort? sendPort) async {}
 
   @override
-  void onButtonPressed(String id) {
+  void onNotificationButtonPressed(String id) {
     if (id == 'stop') {
       FlutterForegroundTask.stopService();
     }

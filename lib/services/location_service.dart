@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 
 import '../models/location_point.dart';
-import 'foreground_service_manager.dart';
+// import 'foreground_service_manager.dart';
 import '../utils/logger.dart';
 
 class LocationServiceException implements Exception {
@@ -24,7 +24,7 @@ class LocationService {
       StreamController<LocationPoint>.broadcast();
   static final LocationSettings _defaultSettings = LocationSettings(
     accuracy: LocationAccuracy.medium,
-    distanceFilter: 50,
+    distanceFilter: 5,
   );
   StreamSubscription<Position>? _positionSub;
   bool _isTracking = false;
@@ -70,19 +70,21 @@ class LocationService {
 
     _isTracking = true;
     await _positionSub?.cancel();
-    logDebug('Activando servicio foreground');
-    await ForegroundServiceManager.instance.startService();
+    // logDebug('Activando servicio foreground');
+    // await ForegroundServiceManager.instance.startService();
     _positionSub =
         Geolocator.getPositionStream(
           locationSettings: settings ?? _defaultSettings,
         ).listen(
           (pos) {
-            logDebug('Coordenadas recibidas',
-                details: 'lat=${pos.latitude}, lng=${pos.longitude}');
+            logDebug(
+              'Coordenadas recibidas',
+              details: 'lat=${pos.latitude}, lng=${pos.longitude}',
+            );
             final point = LocationPoint(
               latitude: pos.latitude,
               longitude: pos.longitude,
-              timestamp: pos.timestamp?.toUtc() ?? DateTime.now().toUtc(),
+              timestamp: pos.timestamp.toUtc(),
               accuracy: pos.accuracy,
               altitude: pos.altitude,
               speed: pos.speed,
@@ -93,8 +95,11 @@ class LocationService {
             }
           },
           onError: (error, stackTrace) {
-            logError('Error en stream de posiciones',
-                error: error, stackTrace: stackTrace);
+            logError(
+              'Error en stream de posiciones',
+              error: error,
+              stackTrace: stackTrace,
+            );
             _isTracking = false;
             if (!_locationController.isClosed) {
               _locationController.addError(error, stackTrace);
@@ -112,7 +117,7 @@ class LocationService {
     await _positionSub?.cancel();
     _positionSub = null;
     _isTracking = false;
-    await ForegroundServiceManager.instance.stopService();
+    // await ForegroundServiceManager.instance.stopService();
   }
 
   Future<LocationPoint?> getCurrentOnce() async {
@@ -122,14 +127,16 @@ class LocationService {
       return null;
     }
     final pos = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.medium,
+      desiredAccuracy: LocationAccuracy.bestForNavigation,
     );
-    logDebug('Posición actual obtenida',
-        details: 'lat=${pos.latitude}, lng=${pos.longitude}');
+    logDebug(
+      'Posición actual obtenida',
+      details: 'lat=${pos.latitude}, lng=${pos.longitude}',
+    );
     return LocationPoint(
       latitude: pos.latitude,
       longitude: pos.longitude,
-      timestamp: pos.timestamp?.toUtc() ?? DateTime.now().toUtc(),
+      timestamp: pos.timestamp.toUtc(),
       accuracy: pos.accuracy,
       altitude: pos.altitude,
       speed: pos.speed,
