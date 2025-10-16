@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: location-postgres
+    environment:
+      POSTGRES_DB: location_tracker
+      POSTGRES_USER: locationapp
+      POSTGRES_PASSWORD: change_me
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    restart: always
+
+volumes:
+  pg_data:
+    driver: local
