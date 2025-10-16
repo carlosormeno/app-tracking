@@ -1,0 +1,78 @@
+# Project-wide artifacts
+.DS_Store
+*.log
+*.swp
+*.tmp
+*.class
+*.pyc
+*.orig
+
+# IDE settings
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.claude/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+coverage/
+
+# Android
+/android/.gradle/
+/android/captures/
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/local.properties
+
+# iOS / macOS
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+ios/Flutter/*.dSYM
+ios/Flutter/flutter_assets/
+ios/ServiceDefinitions.json
+ios/Runner/GeneratedPluginRegistrant.*
+ios/build/
+macos/Flutter/ephemeral/
+macos/build/
+
+# Windows / Linux
+windows/flutter/ephemeral/
+windows/build/
+linux/flutter/ephemeral/
+linux/build/
+
+# Web
+web/.dart_tool/
+
+# Backend (Java/Kotlin - Gradle/Maven)
+backend/.gradle/
+backend/build/
+backend/target/
+backend/out/
+
+# Node / JS tooling
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Misc tool caches
+android/.cxx/
+.valgrind/
+.fleet/
+*.dart.js
+*.info.json
