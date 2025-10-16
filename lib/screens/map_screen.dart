@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart';
 import '../models/location_point.dart';
 import '../services/api_service.dart';
@@ -21,7 +22,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   static const int _trackingStartHour = 8; // Inicio permitido (08:00 local)
-  static const int _trackingEndHour = 18; // Fin permitido (17:00 local)
+  static const int _trackingEndHour = 17; // Fin permitido (17:00 local)
 
   final LocationService _locationService = LocationService();
   final ApiService _apiService = ApiService();
@@ -43,6 +44,8 @@ class _MapScreenState extends State<MapScreen> {
   bool _mapReady = false;
   bool _outsideScheduleHandled = false;
   String? _shutdownMessage;
+  final Map<String, String> _addressCache = {};
+  final Map<String, Future<String>> _addressFutureCache = {};
   StreamSubscription<LocationPoint>? _locationStreamSub;
 
   @override
@@ -105,6 +108,8 @@ class _MapScreenState extends State<MapScreen> {
       _route.clear();
       _showingHistory = false;
       _lastHistoryPoints = [];
+      _addressCache.clear();
+      _addressFutureCache.clear();
       await _startTracking(ensureBackend: false);
     } catch (e) {
       _showError('Error inicializando: $e');
@@ -281,6 +286,8 @@ class _MapScreenState extends State<MapScreen> {
             end: history.end,
           );
           _lastHistoryPoints = history.points;
+          _addressCache.clear();
+          _addressFutureCache.clear();
         });
         if (_route.isNotEmpty) {
           _moveCameraTo(_route.last);
@@ -341,14 +348,41 @@ class _MapScreenState extends State<MapScreen> {
                   itemBuilder: (context, index) {
                     final point = _lastHistoryPoints[index];
                     final localTime = point.timestamp.toLocal();
-                    return ListTile(
-                      leading: Text('#${index + 1}'),
-                      title: Text(
-                        'Lat: ${point.latitude.toStringAsFixed(5)}\nLng: ${point.longitude.toStringAsFixed(5)}',
-                      ),
-                      subtitle: Text(
-                        'Hora: ${TimeOfDay.fromDateTime(localTime).format(context)}',
-                      ),
+                    final timeLabel = TimeOfDay.fromDateTime(
+                      localTime,
+                    ).format(context);
+                    final coordsLabel = _formatCoordinates(point);
+                    return FutureBuilder<String>(
+                      future: _resolveAddress(point),
+                      builder: (context, snapshot) {
+                        final isWaiting =
+                            snapshot.connectionState == ConnectionState.waiting;
+                        final address = snapshot.data;
+                        final displayAddress =
+                            (address != null && address.trim().isNotEmpty)
+                            ? address
+                            : (isWaiting
+                                  ? 'Buscando dirección...'
+                                  : coordsLabel);
+                        final subtitleLines = <String>['Hora: $timeLabel'];
+                        if (displayAddress != coordsLabel) {
+                          subtitleLines.add(coordsLabel);
+                        }
+                        return ListTile(
+                          leading: Text('#${index + 1}'),
+                          title: Text(displayAddress),
+                          subtitle: Text(subtitleLines.join('\n')),
+                          trailing: isWaiting
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : null,
+                        );
+                      },
                     );
                   },
                 ),
@@ -377,6 +411,87 @@ class _MapScreenState extends State<MapScreen> {
     return '${startLocal.day}/${startLocal.month}/${startLocal.year}';
   }
 
+  String _formatCoordinates(LocationPoint point) =>
+      'Lat: ${point.latitude.toStringAsFixed(5)}, Lng: ${point.longitude.toStringAsFixed(5)}';
+
+  String _coordinateKey(LocationPoint point) =>
+      '${point.latitude.toStringAsFixed(6)},${point.longitude.toStringAsFixed(6)}';
+
+  Future<String> _resolveAddress(LocationPoint point) {
+    final key = _coordinateKey(point);
+    final cached = _addressCache[key];
+    if (cached != null) {
+      return Future.value(cached);
+    }
+    final pending = _addressFutureCache[key];
+    if (pending != null) {
+      return pending;
+    }
+    final future = _fetchAddress(point)
+        .then((value) {
+          _addressCache[key] = value;
+          _addressFutureCache.remove(key);
+          return value;
+        })
+        .catchError((error, stackTrace) {
+          logError(
+            'No se pudo obtener la dirección',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          final fallback = _formatCoordinates(point);
+          _addressCache[key] = fallback;
+          _addressFutureCache.remove(key);
+          return fallback;
+        });
+    _addressFutureCache[key] = future;
+    return future;
+  }
+
+  Future<String> _fetchAddress(LocationPoint point) async {
+    final placemarks = await placemarkFromCoordinates(
+      point.latitude,
+      point.longitude,
+      localeIdentifier: 'es',
+    );
+    if (placemarks.isEmpty) {
+      return _formatCoordinates(point);
+    }
+    final placemark = placemarks.first;
+    final streetLine = _joinNonEmpty([
+      placemark.street,
+      placemark.subThoroughfare,
+    ]);
+    final localityLine = _joinNonEmpty([
+      placemark.subLocality,
+      placemark.locality,
+    ]);
+    final regionLine = _joinNonEmpty([
+      placemark.administrativeArea,
+      placemark.postalCode,
+    ]);
+
+    final segments = <String>[
+      if (streetLine != null) streetLine,
+      if (localityLine != null) localityLine,
+      if (regionLine != null) regionLine,
+      if (placemark.country != null && placemark.country!.trim().isNotEmpty)
+        placemark.country!.trim(),
+    ];
+    final filtered = segments.where((element) => element.trim().isNotEmpty);
+    final address = filtered.join(', ');
+    return address.isNotEmpty ? address : _formatCoordinates(point);
+  }
+
+  String? _joinNonEmpty(List<String?> parts, {String separator = ' '}) {
+    final filtered = parts
+        .where((part) => part != null && part.trim().isNotEmpty)
+        .map((part) => part!.trim())
+        .toList();
+    if (filtered.isEmpty) return null;
+    return filtered.join(separator);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -401,6 +516,8 @@ class _MapScreenState extends State<MapScreen> {
                   _lastHistoryRange = null;
                   _route.clear();
                   _lastHistoryPoints = [];
+                  _addressCache.clear();
+                  _addressFutureCache.clear();
                 });
               }
               _bootstrap();
