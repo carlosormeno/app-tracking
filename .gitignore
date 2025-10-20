@@ -59,6 +59,25 @@ backend/.gradle/
 backend/build/
 backend/target/
 backend/out/
+backend/bin/
+backend/logs/
+backend/tmp/
+
+# Backend env files
+# Nota: ya se ignoran .env y .env.* de forma global,
+# pero agregamos la excepción específica para backend.
+backend/.env
+backend/.env.local
+backend/.env.*
+!backend/.env.example
+
+# Eclipse/STS metadata
+backend/.settings/
+backend/.project
+backend/.classpath
+
+# Runtime PIDs
+backend/*.pid
 
 # Node / JS tooling
 node_modules/

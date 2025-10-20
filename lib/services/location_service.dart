@@ -23,7 +23,7 @@ class LocationService {
   final StreamController<LocationPoint> _locationController =
       StreamController<LocationPoint>.broadcast();
   static final LocationSettings _defaultSettings = LocationSettings(
-    accuracy: LocationAccuracy.medium,
+    accuracy: LocationAccuracy.bestForNavigation,
     distanceFilter: 5,
   );
   StreamSubscription<Position>? _positionSub;
