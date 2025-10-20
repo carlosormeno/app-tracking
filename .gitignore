@@ -95,3 +95,7 @@ android/.cxx/
 .fleet/
 *.dart.js
 *.info.json
+.flutter-plugins-dependencies
+.gitignore
+android/app/.gradle/nb-cache/subprojects.ser
+.flutter-plugins-dependencies
