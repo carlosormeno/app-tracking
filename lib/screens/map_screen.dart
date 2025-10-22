@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -62,6 +62,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _fixOriginFirst = true;
   bool _fixDestinationLast = true;
   bool _useCurrentAsOrigin = true;
+  bool _startNotified = false;
 
   String? _nearbyBboxString(LatLng center, double deltaDegrees) {
     final minLat = center.latitude - deltaDegrees;
@@ -69,6 +70,39 @@ class _MapScreenState extends State<MapScreen> {
     final minLon = center.longitude - deltaDegrees;
     final maxLon = center.longitude + deltaDegrees;
     return '${minLon.toStringAsFixed(6)},${minLat.toStringAsFixed(6)},${maxLon.toStringAsFixed(6)},${maxLat.toStringAsFixed(6)}';
+  }
+
+  // Tries to use the current map viewport as bbox. Falls back to a delta box.
+  String? _currentViewportBboxString() {
+    try {
+      final bounds = _mapController.camera.visibleBounds;
+      final south = bounds.south;
+      final west = bounds.west;
+      final north = bounds.north;
+      final east = bounds.east;
+      return '${west.toStringAsFixed(6)},${south.toStringAsFixed(6)},${east.toStringAsFixed(6)},${north.toStringAsFixed(6)}';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  double _deltaForZoom(double zoom) {
+    if (zoom >= 16) return 0.02; // ~2 km
+    if (zoom >= 15) return 0.03;
+    if (zoom >= 14) return 0.05;
+    if (zoom >= 13) return 0.08;
+    if (zoom >= 12) return 0.12;
+    if (zoom >= 11) return 0.20;
+    if (zoom >= 10) return 0.35;
+    return 0.6; // very broad
+  }
+
+  String? _dynamicLocalBboxString() {
+    final byViewport = _currentViewportBboxString();
+    if (byViewport != null) return byViewport;
+    final z = _mapController.camera.zoom;
+    final delta = _deltaForZoom(z);
+    return _nearbyBboxString(_center, delta);
   }
 
   @override
@@ -103,7 +137,7 @@ class _MapScreenState extends State<MapScreen> {
       final uid = identity.uid;
       final email = identity.email;
       if (uid == null || email == null) {
-        _showError('Sesión no válida. Inicia sesión nuevamente.');
+        _showError('SesiÃ³n no vÃ¡lida. Inicia sesiÃ³n nuevamente.');
         return;
       }
       final token = await identity.getIdToken();
@@ -151,7 +185,7 @@ class _MapScreenState extends State<MapScreen> {
       _mapController.move(target, zoom);
     } catch (error, stackTrace) {
       logError(
-        'No se pudo mover la cámara del mapa',
+        'No se pudo mover la cÃ¡mara del mapa',
         error: error,
         stackTrace: stackTrace,
       );
@@ -169,10 +203,16 @@ class _MapScreenState extends State<MapScreen> {
         final ready = await _ensureBackendReady();
         if (!ready) return;
       }
-      logDebug('Tracking iniciado automáticamente');
+      logDebug('Tracking iniciado automÃ¡ticamente');
       await _locationService.start();
       if (mounted) {
         setState(() => _isTracking = true);
+        if (!_startNotified) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Sistema activo')),
+          );
+          _startNotified = true;
+        }
       } else {
         _isTracking = true;
       }
@@ -209,7 +249,7 @@ class _MapScreenState extends State<MapScreen> {
     if (_outsideScheduleHandled) return;
     _outsideScheduleHandled = true;
     final message =
-        'Esta aplicación está disponible entre ${_trackingWindowLabel()}. La aplicación se cerrará.';
+        'Esta aplicaciÃ³n estÃ¡ disponible entre ${_trackingWindowLabel()}. La aplicaciÃ³n se cerrarÃ¡.';
     unawaited(_locationService.stop());
     if (mounted) {
       setState(() {
@@ -266,11 +306,11 @@ class _MapScreenState extends State<MapScreen> {
         await _syncManager.sendOrQueue(firebaseUid: uid, point: point);
       } catch (error, stackTrace) {
         logError(
-          'Fallo al enviar ubicación, quedará en cola',
+          'Fallo al enviar ubicaciÃ³n, quedarÃ¡ en cola',
           error: error,
           stackTrace: stackTrace,
         );
-        _showError('Ubicación almacenada localmente: $error');
+        _showError('UbicaciÃ³n almacenada localmente: $error');
       }
     }());
   }
@@ -281,7 +321,7 @@ class _MapScreenState extends State<MapScreen> {
       _showError('No hay usuario registrado');
       return;
     }
-    logDebug('Solicitando historial del día actual');
+    logDebug('Solicitando historial del dÃ­a actual');
     final now = DateTime.now().toUtc();
     final start = DateTime.utc(now.year, now.month, now.day);
     final end = start.add(const Duration(days: 1));
@@ -336,7 +376,7 @@ class _MapScreenState extends State<MapScreen> {
           '${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}';
     }
     if (_plannerStops.length >= 5) {
-      _showError('Máximo 5 destinos');
+      _showError('MÃ¡ximo 5 destinos');
       return;
     }
     setState(() {
@@ -550,7 +590,7 @@ class _MapScreenState extends State<MapScreen> {
                             (address != null && address.trim().isNotEmpty)
                             ? address
                             : (isWaiting
-                                  ? 'Buscando dirección...'
+                                  ? 'Buscando direcciÃ³n...'
                                   : coordsLabel);
                         final subtitleLines = <String>['Hora: $timeLabel'];
                         if (displayAddress != coordsLabel) {
@@ -630,7 +670,7 @@ class _MapScreenState extends State<MapScreen> {
         })
         .catchError((error, stackTrace) {
           logError(
-            'No se pudo obtener la dirección',
+            'No se pudo obtener la direcciÃ³n',
             error: error,
             stackTrace: stackTrace,
           );
@@ -712,7 +752,7 @@ class _MapScreenState extends State<MapScreen> {
                   s.instruction.isEmpty ? 'Paso ${index + 1}' : s.instruction,
                 ),
                 subtitle: Text(
-                  'Distancia: ${(s.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(s.durationSeconds / 60).toStringAsFixed(0)} min',
+                  'Distancia: ${(s.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(s.durationSeconds / 60).toStringAsFixed(0)} min',
                 ),
               );
             },
@@ -771,7 +811,7 @@ class _MapScreenState extends State<MapScreen> {
                 leading: Text('#${index + 1}'),
                 title: const Text('Tramo'),
                 subtitle: Text(
-                  'Distancia: ${(l.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(l.durationSeconds / 60).toStringAsFixed(0)} min',
+                  'Distancia: ${(l.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(l.durationSeconds / 60).toStringAsFixed(0)} min',
                 ),
               );
             },
@@ -811,7 +851,7 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
+                          'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
                         ),
                       ],
                     ),
@@ -825,7 +865,7 @@ class _MapScreenState extends State<MapScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.my_location),
-            tooltip: 'Refrescar ubicación',
+            tooltip: 'Refrescar ubicaciÃ³n',
             onPressed: () {
               _bootstrap();
             },
@@ -869,7 +909,7 @@ class _MapScreenState extends State<MapScreen> {
                 child: Text('Ver historial por rango'),
               ),
               PopupMenuDivider(),
-              PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')),
+              PopupMenuItem(value: 'logout', child: Text('Cerrar sesiÃ³n')),
             ],
           ),
         ],
@@ -1062,15 +1102,6 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
-      // Route info card
-      bottomSheet: _activeRoute == null ? null : null,
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: null,
-        icon: Icon(_isTracking ? Icons.location_on : Icons.hourglass_top),
-        label: Text(_isTracking ? 'Sistema activo' : 'Activando sistema...'),
-        backgroundColor: _isTracking ? Colors.green : Colors.blueGrey,
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }
 
@@ -1093,17 +1124,39 @@ class _MapScreenState extends State<MapScreen> {
             final q = queryController.text.trim();
             if (q.isEmpty) return;
             try {
-              final results = await _mapbox.geocode(
+              // Try with POIs and local constraints first, then broaden
+              final bbox = _dynamicLocalBboxString();
+              var results = await _mapbox.geocode(
                 q,
                 proximity: _center,
                 country: 'PE',
+                limit: 8,
+                bbox: bbox,
+                types: 'poi,address,place,locality,neighborhood',
               );
+              if (results.isEmpty) {
+                results = await _mapbox.geocode(
+                  q,
+                  proximity: _center,
+                  country: 'PE',
+                  limit: 8,
+                  types: 'poi,address,place,locality,neighborhood',
+                );
+              }
+              if (results.isEmpty) {
+                results = await _mapbox.geocode(
+                  q,
+                  proximity: _center,
+                  limit: 8,
+                  types: 'poi,address,place,locality,neighborhood',
+                );
+              }
               if (results.isEmpty) {
                 _showError('Sin resultados para "$q"');
                 return;
               }
               if (_plannerStops.length >= 5) {
-                _showError('Máximo 5 destinos');
+                _showError('MÃ¡ximo 5 destinos');
                 return;
               }
               setState(() => _plannerStops.add(results.first));
@@ -1115,18 +1168,41 @@ class _MapScreenState extends State<MapScreen> {
             }
           }
 
-          Future<void> searchSuggestions(String q) async {
+          void searchSuggestions(String q) async {
             final query = q.trim();
             if (query.length < 3) {
               setSheetState(() => suggestions = []);
               return;
             }
             try {
-              final results = await _mapbox.geocode(
+              // First try with local restrictions and POIs
+              final bbox = _dynamicLocalBboxString();
+              var results = await _mapbox.geocode(
                 query,
                 proximity: _center,
                 country: 'PE',
+                limit: 8,
+                bbox: bbox,
+                types: 'poi,address,place,locality,neighborhood',
               );
+              // Fallbacks to broaden search
+              if (results.isEmpty) {
+                results = await _mapbox.geocode(
+                  query,
+                  proximity: _center,
+                  country: 'PE',
+                  limit: 8,
+                  types: 'poi,address,place,locality,neighborhood',
+                );
+              }
+              if (results.isEmpty) {
+                results = await _mapbox.geocode(
+                  query,
+                  proximity: _center,
+                  limit: 8,
+                  types: 'poi,address,place,locality,neighborhood',
+                );
+              }
               setSheetState(() => suggestions = results);
             } catch (_) {
               setSheetState(() => suggestions = []);
@@ -1224,7 +1300,7 @@ class _MapScreenState extends State<MapScreen> {
                           child: TextField(
                             controller: queryController,
                             decoration: const InputDecoration(
-                              labelText: 'Buscar dirección o lugar',
+                              labelText: 'Buscar direcciÃ³n o lugar',
                             ),
                             onChanged: searchSuggestions,
                             onSubmitted: (_) => addBySearch(),
@@ -1233,7 +1309,7 @@ class _MapScreenState extends State<MapScreen> {
                         const SizedBox(width: 8),
                         ElevatedButton(
                           onPressed: addBySearch,
-                          child: const Text('Añadir'),
+                          child: const Text('AÃ±adir'),
                         ),
                       ],
                     ),
@@ -1257,7 +1333,7 @@ class _MapScreenState extends State<MapScreen> {
                                 trailing: TextButton(
                                   onPressed: () {
                                     if (_plannerStops.length >= 5) {
-                                      _showError('Máximo 5 destinos');
+                                      _showError('MÃ¡ximo 5 destinos');
                                       return;
                                     }
                                     setState(() => _plannerStops.add(s));
@@ -1266,11 +1342,11 @@ class _MapScreenState extends State<MapScreen> {
                                     });
                                     queryController.clear();
                                   },
-                                  child: const Text('Añadir'),
+                                  child: const Text('AÃ±adir'),
                                 ),
                                 onTap: () {
                                   if (_plannerStops.length >= 5) {
-                                    _showError('Máximo 5 destinos');
+                                    _showError('MÃ¡ximo 5 destinos');
                                     return;
                                   }
                                   setState(() => _plannerStops.add(s));
@@ -1288,6 +1364,22 @@ class _MapScreenState extends State<MapScreen> {
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Mantén presionado el mapa para añadir un destino desde el mapa.'),
+                              duration: Duration(seconds: 3),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.add_location_alt),
+                        label: const Text('Seleccionar en el mapa'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -1298,7 +1390,7 @@ class _MapScreenState extends State<MapScreen> {
                               setState(() => _useCurrentAsOrigin = v);
                             },
                           ),
-                          const Text('Usar mi ubicación como origen'),
+                          const Text('Usar mi ubicaciÃ³n como origen'),
                         ],
                       ),
                     ),
@@ -1336,7 +1428,7 @@ class _MapScreenState extends State<MapScreen> {
                                   setState(() => _fixOriginFirst = v);
                                 },
                               ),
-                              const Text('Fijar origen (1°)'),
+                              const Text('Fijar origen (1Â°)'),
                             ],
                           ),
                           Row(
@@ -1349,7 +1441,7 @@ class _MapScreenState extends State<MapScreen> {
                                   setState(() => _fixDestinationLast = v);
                                 },
                               ),
-                              const Text('Fijar destino (último)'),
+                              const Text('Fijar destino (Ãºltimo)'),
                             ],
                           ),
                         ],
@@ -1389,7 +1481,7 @@ class _MapScreenState extends State<MapScreen> {
                             });
                             setSheetState(() {});
                           },
-                          child: const Text('Limpiar selección'),
+                          child: const Text('Limpiar selecciÃ³n'),
                         ),
                         ElevatedButton.icon(
                           onPressed: calculate,
@@ -1443,3 +1535,7 @@ class _AnimatedLoading extends StatelessWidget {
     );
   }
 }
+
+
+
+

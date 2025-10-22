@@ -37,16 +37,20 @@ class MapboxService {
     String language = 'es',
     int limit = 5,
     String? bbox, // format: minLon,minLat,maxLon,maxLat
+    String? types, // e.g., 'poi,address,place,locality'
+    bool fuzzyMatch = true,
   }) async {
     final params = <String, String>{
       'autocomplete': 'true',
       'limit': limit.toString(),
       'language': language,
       'access_token': _token,
+      'fuzzyMatch': fuzzyMatch ? 'true' : 'false',
       if (proximity != null)
         'proximity': '${proximity.longitude.toStringAsFixed(6)},${proximity.latitude.toStringAsFixed(6)}',
       if (country != null && country.isNotEmpty) 'country': country.toLowerCase(),
       if (bbox != null && bbox.isNotEmpty) 'bbox': bbox,
+      if (types != null && types.isNotEmpty) 'types': types,
     };
     final qs = params.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
     final uri = Uri.parse(
