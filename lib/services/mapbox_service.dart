@@ -18,12 +18,15 @@ class MapboxServiceException implements Exception {
 enum RoutingMode { walking, driving }
 
 class MapboxService {
-  MapboxService({http.Client? client}) : _client = client ?? http.Client();
+  MapboxService({http.Client? client, String? accessToken})
+      : _client = client ?? http.Client(),
+        _overrideToken = accessToken;
 
   final http.Client _client;
+  final String? _overrideToken;
 
   String get _token {
-    final t = MapboxConfig.accessToken;
+    final t = _overrideToken ?? MapboxConfig.accessToken;
     if (t.isEmpty) {
       throw MapboxServiceException('Mapbox token no configurado');
     }
