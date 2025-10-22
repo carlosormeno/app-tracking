@@ -17,6 +17,7 @@ import '../models/destination.dart';
 import '../models/route_models.dart';
 import '../services/mapbox_service.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -49,6 +50,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _mapReady = false;
   bool _outsideScheduleHandled = false;
   String? _shutdownMessage;
+  String? _connectionMessage;
   final Map<String, String> _addressCache = {};
   final Map<String, Future<String>> _addressFutureCache = {};
   StreamSubscription<LocationPoint>? _locationStreamSub;
@@ -63,6 +65,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _fixDestinationLast = true;
   bool _useCurrentAsOrigin = true;
   bool _startNotified = false;
+  bool _selectingOnMap = false;
 
   String? _nearbyBboxString(LatLng center, double deltaDegrees) {
     final minLat = center.latitude - deltaDegrees;
@@ -127,10 +130,12 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) {
         setState(() {
           _shutdownMessage = null;
+          _connectionMessage = null;
           _outsideScheduleHandled = false;
         });
       } else {
         _shutdownMessage = null;
+        _connectionMessage = null;
         _outsideScheduleHandled = false;
       }
       final identity = IdentityService();
@@ -150,7 +155,16 @@ class _MapScreenState extends State<MapScreen> {
         _email = email;
       });
       final ready = await _ensureBackendReady();
-      if (!ready) return;
+      if (!ready) {
+        if (mounted) {
+          setState(() {
+            _connectionMessage = 'No se pudo conectar con el servidor. Reintenta en unos segundos.';
+          });
+        } else {
+          _connectionMessage = 'No se pudo conectar con el servidor. Reintenta en unos segundos.';
+        }
+        return;
+      }
       if (!_isWithinTrackingWindow(DateTime.now())) {
         _handleOutsideTrackingHours();
         return;
@@ -294,6 +308,7 @@ class _MapScreenState extends State<MapScreen> {
       return true;
     } catch (e) {
       _showError('No se pudo registrar el usuario: $e');
+      logError('Fallo de backend al registrar usuario', error: e);
       return false;
     }
   }
@@ -321,7 +336,7 @@ class _MapScreenState extends State<MapScreen> {
       _showError('No hay usuario registrado');
       return;
     }
-    logDebug('Solicitando historial del dÃ­a actual');
+    logDebug('Solicitando historial del dí­a actual');
     final now = DateTime.now().toUtc();
     final start = DateTime.utc(now.year, now.month, now.day);
     final end = start.add(const Duration(days: 1));
@@ -367,7 +382,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _handleMapLongPress(TapPosition tapPosition, LatLng point) async {
-    if (!_plannerActive) return;
+    if (!(_plannerActive || _selectingOnMap)) return;
     String name;
     try {
       name = await _mapbox.reverseGeocode(point);
@@ -389,6 +404,10 @@ class _MapScreenState extends State<MapScreen> {
           source: DestinationSource.map,
         ),
       );
+      if (_selectingOnMap) {
+        _selectingOnMap = false;
+        Future.microtask(_openRoutePlanner);
+      }
     });
   }
 
@@ -599,7 +618,7 @@ class _MapScreenState extends State<MapScreen> {
                         return ListTile(
                           leading: Text('#${index + 1}'),
                           title: Text(displayAddress),
-                          subtitle: Text(subtitleLines.join('\n')),
+                          subtitle: Text(subtitleLines.join('')),
                           trailing: isWaiting
                               ? const SizedBox(
                                   width: 18,
@@ -752,7 +771,7 @@ class _MapScreenState extends State<MapScreen> {
                   s.instruction.isEmpty ? 'Paso ${index + 1}' : s.instruction,
                 ),
                 subtitle: Text(
-                  'Distancia: ${(s.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(s.durationSeconds / 60).toStringAsFixed(0)} min',
+                  'Distancia: ${(s.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(s.durationSeconds / 60).toStringAsFixed(0)} min',
                 ),
               );
             },
@@ -787,6 +806,45 @@ class _MapScreenState extends State<MapScreen> {
     await Share.share(buffer.toString(), subject: 'Ruta Thaqhiri');
   }
 
+  Future<void> _startExternalNavigation() async {
+    if (_plannerStops.isEmpty && _activeRoute == null) {
+      _showError('No hay ruta para iniciar');
+      return;
+    }
+    final mode = _routingMode == RoutingMode.walking ? 'walking' : 'driving';
+    String originParam;
+    if (_useCurrentAsOrigin) {
+      originParam = 'origin=Current+Location';
+    } else if (_plannerStops.isNotEmpty) {
+      final o = _plannerStops.first;
+      originParam = 'origin=${o.latitude},${o.longitude}';
+    } else {
+      originParam = 'origin=Current+Location';
+    }
+    String destinationParam;
+    if (_plannerStops.isNotEmpty) {
+      final d = _plannerStops.last;
+      destinationParam = 'destination=${d.latitude},${d.longitude}';
+    } else {
+      // fallback to map center if no planner stops (unlikely)
+      destinationParam = 'destination=${_center.latitude},${_center.longitude}';
+    }
+    // Include intermediate waypoints if any (Google Maps supports limited count)
+    final mid = _plannerStops.length > 2
+        ? _plannerStops
+              .sublist(1, _plannerStops.length - 1)
+              .map((s) => '${s.latitude},${s.longitude}')
+              .join('|')
+        : '';
+    final waypointsParam = mid.isNotEmpty ? '&waypoints=$mid' : '';
+    final uri = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&$originParam&$destinationParam$waypointsParam&travelmode=$mode',
+    );
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      _showError('No se pudo abrir Google Maps');
+    }
+  }
+
   void _showRouteLegs() {
     final route = _activeRoute;
     if (route == null) return;
@@ -811,7 +869,7 @@ class _MapScreenState extends State<MapScreen> {
                 leading: Text('#${index + 1}'),
                 title: const Text('Tramo'),
                 subtitle: Text(
-                  'Distancia: ${(l.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(l.durationSeconds / 60).toStringAsFixed(0)} min',
+                  'Distancia: ${(l.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(l.durationSeconds / 60).toStringAsFixed(0)} min',
                 ),
               );
             },
@@ -833,31 +891,6 @@ class _MapScreenState extends State<MapScreen> {
               height: 28,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
             ),
-            if (_activeRoute != null)
-              Positioned(
-                top: 16,
-                left: 16,
-                right: 16,
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Ruta calculada (${_routingMode == RoutingMode.walking ? 'Caminar' : 'Conducir'})',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km â€¢ Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
             const SizedBox(width: 8),
             const Text('Thaqhiri'),
           ],
@@ -926,6 +959,7 @@ class _MapScreenState extends State<MapScreen> {
                 _moveCameraTo(_center);
               },
               onLongPress: _handleMapLongPress,
+              onTap: _handleMapLongPress,
             ),
             children: [
               TileLayer(
@@ -1066,7 +1100,100 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+          if (_activeRoute != null)
+            Positioned(
+              top: 16,
+              left: 16,
+              right: 16,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Ruta calculada (${_routingMode == RoutingMode.walking ? 'Caminar' : 'Conducir'})',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton.icon(
+                            onPressed: _showRouteSteps,
+                            icon: const Icon(Icons.list_alt),
+                            label: const Text('Ver pasos'),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            onPressed: _showRouteLegs,
+                            icon: const Icon(Icons.route),
+                            label: const Text('Ver tramos'),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            onPressed: _startExternalNavigation,
+                            icon: const Icon(Icons.navigation),
+                            label: const Text('Iniciar'),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            onPressed: _shareActiveRoute,
+                            icon: const Icon(Icons.share),
+                            label: const Text('Compartir'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           if (_isLoading) const Center(child: _AnimatedLoading()),
+          if (_activeRoute != null)
+            Positioned(
+              bottom: 20,
+              right: 16,
+              child: ElevatedButton.icon(
+                onPressed: _startExternalNavigation,
+                icon: const Icon(Icons.navigation),
+                label: const Text('Iniciar'),
+              ),
+            ),
+          if (_selectingOnMap)
+            Positioned(
+              top: 16,
+              left: 16,
+              right: 16,
+              child: Card(
+                color: Colors.black87,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Toca o mantén presionado el mapa para añadir un destino',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setState(() => _selectingOnMap = false);
+                        },
+                        child: const Text('Cancelar'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           if (_shutdownMessage != null)
             Positioned.fill(
               child: Container(
@@ -1092,6 +1219,51 @@ class _MapScreenState extends State<MapScreen> {
                             _shutdownMessage!,
                             textAlign: TextAlign.center,
                             style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (_connectionMessage != null)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black54,
+                alignment: Alignment.center,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 340),
+                  child: Card(
+                    margin: const EdgeInsets.all(24),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.cloud_off,
+                            color: Colors.orange,
+                            size: 48,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _connectionMessage!,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 12),
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                _isLoading = true;
+                                _connectionMessage = null;
+                              });
+                              _bootstrap();
+                            },
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reintentar'),
                           ),
                         ],
                       ),
@@ -1309,7 +1481,7 @@ class _MapScreenState extends State<MapScreen> {
                         const SizedBox(width: 8),
                         ElevatedButton(
                           onPressed: addBySearch,
-                          child: const Text('AÃ±adir'),
+                          child: const Text('Añadir'),
                         ),
                       ],
                     ),
@@ -1342,7 +1514,7 @@ class _MapScreenState extends State<MapScreen> {
                                     });
                                     queryController.clear();
                                   },
-                                  child: const Text('AÃ±adir'),
+                                  child: const Text('Añadir'),
                                 ),
                                 onTap: () {
                                   if (_plannerStops.length >= 5) {
@@ -1366,10 +1538,12 @@ class _MapScreenState extends State<MapScreen> {
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
                         onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
+                          Navigator.of(context).pop();
+                          setState(() => _selectingOnMap = true);
+                          ScaffoldMessenger.of(this.context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                'Mantén presionado el mapa para añadir un destino desde el mapa.',
+                                'Selecciona un punto en el mapa (tap o long-press)',
                               ),
                               duration: Duration(seconds: 3),
                             ),
@@ -1379,6 +1553,7 @@ class _MapScreenState extends State<MapScreen> {
                         label: const Text('Seleccionar en el mapa'),
                       ),
                     ),
+
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerLeft,
@@ -1443,7 +1618,7 @@ class _MapScreenState extends State<MapScreen> {
                                   setState(() => _fixDestinationLast = v);
                                 },
                               ),
-                              const Text('Fijar destino (Ãºltimo)'),
+                              const Text('Fijar destino (último)'),
                             ],
                           ),
                         ],

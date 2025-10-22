@@ -7,11 +7,14 @@ import '../models/location_point.dart';
 import '../utils/logger.dart';
 
 class ApiService {
-  ApiService({http.Client? client}) : _client = client ?? http.Client();
+  ApiService({http.Client? client, Duration? timeout})
+      : _client = client ?? http.Client(),
+        _timeout = timeout ?? const Duration(seconds: 10);
 
   final http.Client _client;
   bool _userRegistered = false;
   String? _authToken;
+  final Duration _timeout;
 
   Uri _buildUri(String path) {
     final base = Constants.apiBaseUrl;
@@ -38,14 +41,16 @@ class ApiService {
     logDebug('Registrando usuario en API',
         details: 'uid=$firebaseUid email=$email');
 
-    final response = await _client.post(
-      _buildUri('/users'),
-      headers: _jsonHeaders(),
-      body: jsonEncode({
-        'firebaseUid': firebaseUid,
-        'email': email,
-      }),
-    );
+    final response = await _client
+        .post(
+          _buildUri('/users'),
+          headers: _jsonHeaders(),
+          body: jsonEncode({
+            'firebaseUid': firebaseUid,
+            'email': email,
+          }),
+        )
+        .timeout(_timeout);
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       _userRegistered = true;
@@ -80,11 +85,13 @@ class ApiService {
       if (activityType != null) 'activityType': activityType,
     };
 
-    final response = await _client.post(
-      _buildUri('/locations'),
-      headers: _jsonHeaders(),
-      body: jsonEncode(payload),
-    );
+    final response = await _client
+        .post(
+          _buildUri('/locations'),
+          headers: _jsonHeaders(),
+          body: jsonEncode(payload),
+        )
+        .timeout(_timeout);
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       logDebug('Ubicación enviada correctamente');
@@ -110,7 +117,9 @@ class ApiService {
       '&end=${end.toUtc().toIso8601String()}',
     );
 
-    final response = await _client.get(uri, headers: _jsonHeaders());
+    final response = await _client
+        .get(uri, headers: _jsonHeaders())
+        .timeout(_timeout);
     if (response.statusCode != 200) {
       throw ApiException(
         'Error obteniendo historial (${response.statusCode}): ${response.body}',
@@ -131,7 +140,9 @@ class ApiService {
     final uri = _buildUri(
       '/locations/distance?firebaseUid=$firebaseUid&date=${date.toIso8601String().split('T').first}',
     );
-    final response = await _client.get(uri, headers: _jsonHeaders());
+    final response = await _client
+        .get(uri, headers: _jsonHeaders())
+        .timeout(_timeout);
     if (response.statusCode != 200) {
       throw ApiException(
         'Error obteniendo distancia (${response.statusCode}): ${response.body}',

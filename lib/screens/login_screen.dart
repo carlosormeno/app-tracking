@@ -16,6 +16,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isRegisterMode = false;
   bool _isLoading = false;
   String? _errorMessage;
+  bool _showPassword = false;
 
   final AuthService _authService = AuthService();
 
@@ -64,10 +65,23 @@ class _LoginScreenState extends State<LoginScreen> {
       appBar: AppBar(
         title: Text(_isRegisterMode ? 'Crear cuenta' : 'Iniciar sesión'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                24,
+                24,
+                24,
+                MediaQuery.of(context).viewInsets.bottom + 24,
+              ),
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight - 48),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
             TextField(
               controller: _emailController,
               keyboardType: TextInputType.emailAddress,
@@ -76,8 +90,20 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 16),
             TextField(
               controller: _passwordController,
-              obscureText: true,
+              obscureText: !_showPassword,
               decoration: const InputDecoration(labelText: 'Contraseña'),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: [
+                Checkbox(
+                  value: _showPassword,
+                  onChanged: (v) {
+                    setState(() => _showPassword = v ?? false);
+                  },
+                ),
+                const Text('Ver contraseña'),
+              ],
             ),
             if (_errorMessage != null) ...[
               const SizedBox(height: 12),
@@ -113,7 +139,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   ? '¿Ya tienes cuenta? Inicia sesión'
                   : 'Crear una cuenta nueva'),
             )
-          ],
+                  ],
+                ),
+              ),
+            );
+          },
         ),
       ),
     );
