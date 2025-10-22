@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart';
+import '../config/mapbox_config.dart';
 import '../models/location_point.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -12,6 +13,10 @@ import '../services/identity_service.dart';
 import '../services/location_service.dart';
 import '../services/location_sync_manager.dart';
 import '../utils/logger.dart';
+import '../models/destination.dart';
+import '../models/route_models.dart';
+import '../services/mapbox_service.dart';
+import 'package:share_plus/share_plus.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -22,7 +27,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   static const int _trackingStartHour = 8; // Inicio permitido (08:00 local)
-  static const int _trackingEndHour = 17; // Fin permitido (17:00 local)
+  static const int _trackingEndHour = 18; // Fin permitido (17:00 local)
 
   final LocationService _locationService = LocationService();
   final ApiService _apiService = ApiService();
@@ -47,6 +52,24 @@ class _MapScreenState extends State<MapScreen> {
   final Map<String, String> _addressCache = {};
   final Map<String, Future<String>> _addressFutureCache = {};
   StreamSubscription<LocationPoint>? _locationStreamSub;
+  // Planificador de rutas (Mapbox)
+  final MapboxService _mapbox = MapboxService();
+  final List<Destination> _plannerStops = [];
+  RoutingMode _routingMode = RoutingMode.walking;
+  bool _optimizeStops = true;
+  RouteResult? _activeRoute;
+  bool _plannerActive = false;
+  bool _fixOriginFirst = true;
+  bool _fixDestinationLast = true;
+  bool _useCurrentAsOrigin = true;
+
+  String? _nearbyBboxString(LatLng center, double deltaDegrees) {
+    final minLat = center.latitude - deltaDegrees;
+    final maxLat = center.latitude + deltaDegrees;
+    final minLon = center.longitude - deltaDegrees;
+    final maxLon = center.longitude + deltaDegrees;
+    return '${minLon.toStringAsFixed(6)},${minLat.toStringAsFixed(6)},${maxLon.toStringAsFixed(6)},${maxLat.toStringAsFixed(6)}';
+  }
 
   @override
   void initState() {
@@ -303,6 +326,171 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  void _handleMapLongPress(TapPosition tapPosition, LatLng point) async {
+    if (!_plannerActive) return;
+    String name;
+    try {
+      name = await _mapbox.reverseGeocode(point);
+    } catch (_) {
+      name =
+          '${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}';
+    }
+    if (_plannerStops.length >= 5) {
+      _showError('Máximo 5 destinos');
+      return;
+    }
+    setState(() {
+      _plannerStops.add(
+        Destination(
+          id: 'map_${DateTime.now().millisecondsSinceEpoch}',
+          name: name,
+          latitude: point.latitude,
+          longitude: point.longitude,
+          source: DestinationSource.map,
+        ),
+      );
+    });
+  }
+
+  Future<void> _loadHistoryForDate(DateTime date) async {
+    final uid = _firebaseUid;
+    if (uid == null) {
+      _showError('No hay usuario registrado');
+      return;
+    }
+    logDebug('Solicitando historial por fecha');
+    final start = DateTime.utc(date.year, date.month, date.day);
+    final end = start.add(const Duration(days: 1));
+
+    try {
+      final history = await _apiService.fetchHistory(
+        firebaseUid: uid,
+        start: start,
+        end: end,
+      );
+      if (mounted) {
+        setState(() {
+          _showingHistory = true;
+          _route
+            ..clear()
+            ..addAll(
+              history.points.map((p) => LatLng(p.latitude, p.longitude)),
+            );
+          if (_route.isNotEmpty) {
+            _center = _route.last;
+          }
+          _lastDistanceKm = history.totalDistanceKm;
+          _lastHistoryRange = DateTimeRange(
+            start: history.start,
+            end: history.end,
+          );
+          _lastHistoryPoints = history.points;
+          _addressCache.clear();
+          _addressFutureCache.clear();
+        });
+        if (_route.isNotEmpty) {
+          _moveCameraTo(_route.last);
+        }
+        logDebug(
+          'Historial cargado por fecha',
+          details:
+              'puntos=${history.points.length} distancia=${history.totalDistanceKm}',
+        );
+      }
+    } catch (e) {
+      _showError('No se pudo cargar historial: $e');
+    }
+  }
+
+  Future<void> _selectAndLoadHistory() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2020, 1, 1),
+      lastDate: DateTime.now(),
+      helpText: 'Selecciona una fecha',
+      cancelText: 'Cancelar',
+      confirmText: 'Aceptar',
+    );
+    if (picked == null) return;
+    await _loadHistoryForDate(picked);
+  }
+
+  Future<void> _selectAndLoadHistoryRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020, 1, 1),
+      lastDate: DateTime.now(),
+      initialDateRange: DateTimeRange(
+        start: DateTime.now().subtract(const Duration(days: 1)),
+        end: DateTime.now(),
+      ),
+      helpText: 'Selecciona un rango de fechas',
+      cancelText: 'Cancelar',
+      confirmText: 'Aceptar',
+    );
+    if (picked == null) return;
+    await _loadHistoryForRange(picked);
+  }
+
+  Future<void> _loadHistoryForRange(DateTimeRange range) async {
+    final uid = _firebaseUid;
+    if (uid == null) {
+      _showError('No hay usuario registrado');
+      return;
+    }
+    logDebug('Solicitando historial por rango');
+    final startUtc = DateTime.utc(
+      range.start.year,
+      range.start.month,
+      range.start.day,
+    );
+    final endUtc = DateTime.utc(
+      range.end.year,
+      range.end.month,
+      range.end.day,
+    ).add(const Duration(days: 1));
+
+    try {
+      final history = await _apiService.fetchHistory(
+        firebaseUid: uid,
+        start: startUtc,
+        end: endUtc,
+      );
+      if (mounted) {
+        setState(() {
+          _showingHistory = true;
+          _route
+            ..clear()
+            ..addAll(
+              history.points.map((p) => LatLng(p.latitude, p.longitude)),
+            );
+          if (_route.isNotEmpty) {
+            _center = _route.last;
+          }
+          _lastDistanceKm = history.totalDistanceKm;
+          _lastHistoryRange = DateTimeRange(
+            start: history.start,
+            end: history.end,
+          );
+          _lastHistoryPoints = history.points;
+          _addressCache.clear();
+          _addressFutureCache.clear();
+        });
+        if (_route.isNotEmpty) {
+          _moveCameraTo(_route.last);
+        }
+        logDebug(
+          'Historial cargado por rango',
+          details:
+              'puntos=${history.points.length} distancia=${history.totalDistanceKm}',
+        );
+      }
+    } catch (e) {
+      _showError('No se pudo cargar historial: $e');
+    }
+  }
+
   Future<void> _tryFlushPending() async {
     try {
       await _syncManager.flushPending();
@@ -408,7 +596,14 @@ class _MapScreenState extends State<MapScreen> {
 
   String _formatRange(DateTimeRange range) {
     final startLocal = range.start.toLocal();
-    return '${startLocal.day}/${startLocal.month}/${startLocal.year}';
+    final endLocal = range.end.toLocal();
+    String fmt(DateTime d) => '${d.day}/${d.month}/${d.year}';
+    if (startLocal.year == endLocal.year &&
+        startLocal.month == endLocal.month &&
+        startLocal.day == endLocal.day) {
+      return fmt(startLocal);
+    }
+    return '${fmt(startLocal)} - ${fmt(endLocal)}';
   }
 
   String _formatCoordinates(LocationPoint point) =>
@@ -492,39 +687,163 @@ class _MapScreenState extends State<MapScreen> {
     return filtered.join(separator);
   }
 
+  void _showRouteSteps() {
+    final route = _activeRoute;
+    if (route == null) return;
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        if (route.steps.isEmpty) {
+          return const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('No hay instrucciones disponibles'),
+          );
+        }
+        return SafeArea(
+          child: ListView.separated(
+            padding: const EdgeInsets.all(12),
+            itemCount: route.steps.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final s = route.steps[index];
+              return ListTile(
+                leading: Text('#${index + 1}'),
+                title: Text(
+                  s.instruction.isEmpty ? 'Paso ${index + 1}' : s.instruction,
+                ),
+                subtitle: Text(
+                  'Distancia: ${(s.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(s.durationSeconds / 60).toStringAsFixed(0)} min',
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _shareActiveRoute() async {
+    final route = _activeRoute;
+    if (route == null) return;
+    final modeLabel = _routingMode == RoutingMode.walking
+        ? 'Caminar'
+        : 'Conducir';
+    final buffer = StringBuffer()
+      ..writeln('Ruta ($modeLabel)')
+      ..writeln(
+        'Distancia: ${(route.distanceMeters / 1000).toStringAsFixed(2)} km',
+      )
+      ..writeln(
+        'Tiempo: ${(route.durationSeconds / 60).toStringAsFixed(0)} min',
+      )
+      ..writeln('')
+      ..writeln('Instrucciones:');
+    for (var i = 0; i < route.steps.length; i++) {
+      final s = route.steps[i];
+      buffer.writeln(
+        '${i + 1}. ${s.instruction.isEmpty ? 'Paso ${i + 1}' : s.instruction}',
+      );
+    }
+    await Share.share(buffer.toString(), subject: 'Ruta Thaqhiri');
+  }
+
+  void _showRouteLegs() {
+    final route = _activeRoute;
+    if (route == null) return;
+    final legs = route.legs;
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        if (legs.isEmpty) {
+          return const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('No hay tramos disponibles'),
+          );
+        }
+        return SafeArea(
+          child: ListView.separated(
+            padding: const EdgeInsets.all(12),
+            itemCount: legs.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final l = legs[index];
+              return ListTile(
+                leading: Text('#${index + 1}'),
+                title: const Text('Tramo'),
+                subtitle: Text(
+                  'Distancia: ${(l.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(l.durationSeconds / 60).toStringAsFixed(0)} min',
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Tracking de ubicación (MVP)'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset(
+              'assets/images/onp_logo.png',
+              height: 28,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+            if (_activeRoute != null)
+              Positioned(
+                top: 16,
+                left: 16,
+                right: 16,
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Ruta calculada (${_routingMode == RoutingMode.walking ? 'Caminar' : 'Conducir'})',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(width: 8),
+            const Text('Thaqhiri'),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: 'Ver historial (día actual)',
-            onPressed: _loadTodayHistory,
-          ),
-          IconButton(
-            icon: Icon(_showingHistory ? Icons.clear : Icons.my_location),
-            tooltip: _showingHistory
-                ? 'Limpiar historial'
-                : 'Refrescar ubicación',
+            icon: const Icon(Icons.my_location),
+            tooltip: 'Refrescar ubicación',
             onPressed: () {
-              if (_showingHistory) {
-                setState(() {
-                  _showingHistory = false;
-                  _lastDistanceKm = 0;
-                  _lastHistoryRange = null;
-                  _route.clear();
-                  _lastHistoryPoints = [];
-                  _addressCache.clear();
-                  _addressFutureCache.clear();
-                });
-              }
               _bootstrap();
             },
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
+              if (value == 'route_planner') {
+                await _openRoutePlanner();
+                return;
+              }
+              if (value == 'history') {
+                await _selectAndLoadHistory();
+                return;
+              }
+              if (value == 'history_range') {
+                await _selectAndLoadHistoryRange();
+                return;
+              }
               if (value == 'logout') {
                 if (_isTracking) {
                   await _locationService.stop();
@@ -537,6 +856,19 @@ class _MapScreenState extends State<MapScreen> {
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'route_planner',
+                child: Text('Planificar ruta'),
+              ),
+              PopupMenuItem(
+                value: 'history',
+                child: Text('Ver historial por fecha'),
+              ),
+              PopupMenuItem(
+                value: 'history_range',
+                child: Text('Ver historial por rango'),
+              ),
+              PopupMenuDivider(),
               PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')),
             ],
           ),
@@ -553,10 +885,19 @@ class _MapScreenState extends State<MapScreen> {
                 _mapReady = true;
                 _moveCameraTo(_center);
               },
+              onLongPress: _handleMapLongPress,
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate: MapboxConfig.isConfigured
+                    ? 'https://api.mapbox.com/styles/v1/{styleId}/tiles/256/{z}/{x}/{y}@2x?access_token={accessToken}'
+                    : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                additionalOptions: MapboxConfig.isConfigured
+                    ? {
+                        'accessToken': MapboxConfig.accessToken,
+                        'styleId': MapboxConfig.styleId,
+                      }
+                    : const <String, String>{},
                 userAgentPackageName: 'com.example.flutter_application_1',
               ),
               if (_route.length > 1)
@@ -591,6 +932,16 @@ class _MapScreenState extends State<MapScreen> {
                         color: Colors.red,
                         size: 36,
                       ),
+                    ),
+                  ],
+                ),
+              if (_activeRoute != null && _activeRoute!.coordinates.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _activeRoute!.coordinates,
+                      color: Colors.deepPurple,
+                      strokeWidth: 5,
                     ),
                   ],
                 ),
@@ -675,7 +1026,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          if (_isLoading) const Center(child: CircularProgressIndicator()),
+          if (_isLoading) const Center(child: _AnimatedLoading()),
           if (_shutdownMessage != null)
             Positioned.fill(
               child: Container(
@@ -711,6 +1062,8 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
+      // Route info card
+      bottomSheet: _activeRoute == null ? null : null,
       floatingActionButton: FloatingActionButton.extended(
         onPressed: null,
         icon: Icon(_isTracking ? Icons.location_on : Icons.hourglass_top),
@@ -718,6 +1071,375 @@ class _MapScreenState extends State<MapScreen> {
         backgroundColor: _isTracking ? Colors.green : Colors.blueGrey,
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  Future<void> _openRoutePlanner() async {
+    setState(() => _plannerActive = true);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final queryController = TextEditingController();
+        bool localOptimize = _optimizeStops;
+        bool localFixOrigin = _fixOriginFirst;
+        bool localFixDestination = _fixDestinationLast;
+        bool localUseCurrent = _useCurrentAsOrigin;
+        List<Destination> suggestions = [];
+        RoutingMode localMode = _routingMode;
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+          Future<void> addBySearch() async {
+            final q = queryController.text.trim();
+            if (q.isEmpty) return;
+            try {
+              final results = await _mapbox.geocode(
+                q,
+                proximity: _center,
+                country: 'PE',
+              );
+              if (results.isEmpty) {
+                _showError('Sin resultados para "$q"');
+                return;
+              }
+              if (_plannerStops.length >= 5) {
+                _showError('Máximo 5 destinos');
+                return;
+              }
+              setState(() => _plannerStops.add(results.first));
+              setSheetState(() {});
+              queryController.clear();
+              suggestions = [];
+            } catch (e) {
+              _showError('Error buscando: $e');
+            }
+          }
+
+          Future<void> searchSuggestions(String q) async {
+            final query = q.trim();
+            if (query.length < 3) {
+              setSheetState(() => suggestions = []);
+              return;
+            }
+            try {
+              final results = await _mapbox.geocode(
+                query,
+                proximity: _center,
+                country: 'PE',
+              );
+              setSheetState(() => suggestions = results);
+            } catch (_) {
+              setSheetState(() => suggestions = []);
+            }
+          }
+
+            Future<void> calculate() async {
+            if (localUseCurrent) {
+              if (_plannerStops.isEmpty) {
+                _showError('Agrega al menos un destino');
+                return;
+              }
+            } else {
+              if (_plannerStops.length < 2) {
+                _showError('Agrega al menos origen y destino');
+                return;
+              }
+            }
+            try {
+              final points = <LatLng>[
+                if (localUseCurrent) _center,
+                ..._plannerStops
+                    .map((d) => LatLng(d.latitude, d.longitude))
+                    .toList(),
+              ];
+              final result = (localOptimize && points.length > 2)
+                  ? await _mapbox.optimize(
+                      mode: localMode,
+                      waypoints: points,
+                      sourceFirst: localUseCurrent ? true : localFixOrigin,
+                      destinationLast: localFixDestination,
+                    )
+                  : await _mapbox.directions(
+                      mode: localMode,
+                      waypoints: points,
+                    );
+                if (!mounted) return;
+                setState(() => _activeRoute = result);
+                Navigator.of(context).pop();
+              } catch (e) {
+                _showError('No se pudo calcular ruta: $e');
+              }
+            }
+
+            void removeAt(int index) {
+              setState(() => _plannerStops.removeAt(index));
+              setSheetState(() {});
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).viewInsets.bottom,
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Planificador de ruta',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Caminar'),
+                          selected: localMode == RoutingMode.walking,
+                          onSelected: (_) {
+                            setSheetState(
+                              () => localMode = RoutingMode.walking,
+                            );
+                            setState(() => _routingMode = RoutingMode.walking);
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('Conducir (aprox. bus)'),
+                          selected: localMode == RoutingMode.driving,
+                          onSelected: (_) {
+                            setSheetState(
+                              () => localMode = RoutingMode.driving,
+                            );
+                            setState(() => _routingMode = RoutingMode.driving);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: queryController,
+                            decoration: const InputDecoration(
+                              labelText: 'Buscar dirección o lugar',
+                            ),
+                            onChanged: searchSuggestions,
+                            onSubmitted: (_) => addBySearch(),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: addBySearch,
+                          child: const Text('Añadir'),
+                        ),
+                      ],
+                    ),
+                    if (suggestions.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 240),
+                        child: Material(
+                          elevation: 2,
+                          child: ListView.builder(
+                            shrinkWrap: true,
+                            itemCount: suggestions.length,
+                            itemBuilder: (context, index) {
+                              final s = suggestions[index];
+                              return ListTile(
+                                dense: true,
+                                title: Text(s.name),
+                                subtitle: Text(
+                                  'Lat: ${s.latitude.toStringAsFixed(5)}, Lng: ${s.longitude.toStringAsFixed(5)}',
+                                ),
+                                trailing: TextButton(
+                                  onPressed: () {
+                                    if (_plannerStops.length >= 5) {
+                                      _showError('Máximo 5 destinos');
+                                      return;
+                                    }
+                                    setState(() => _plannerStops.add(s));
+                                    setSheetState(() {
+                                      suggestions = [];
+                                    });
+                                    queryController.clear();
+                                  },
+                                  child: const Text('Añadir'),
+                                ),
+                                onTap: () {
+                                  if (_plannerStops.length >= 5) {
+                                    _showError('Máximo 5 destinos');
+                                    return;
+                                  }
+                                  setState(() => _plannerStops.add(s));
+                                  setSheetState(() {
+                                    suggestions = [];
+                                  });
+                                  queryController.clear();
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Switch(
+                            value: localUseCurrent,
+                            onChanged: (v) {
+                              setSheetState(() => localUseCurrent = v);
+                              setState(() => _useCurrentAsOrigin = v);
+                            },
+                          ),
+                          const Text('Usar mi ubicación como origen'),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Switch(
+                            value: localOptimize,
+                            onChanged: (v) {
+                              setSheetState(() => localOptimize = v);
+                              setState(() => _optimizeStops = v);
+                            },
+                          ),
+                          const Text('Optimizar orden'),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: 16,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Switch(
+                                value: localFixOrigin,
+                                onChanged: (v) {
+                                  setSheetState(() => localFixOrigin = v);
+                                  setState(() => _fixOriginFirst = v);
+                                },
+                              ),
+                              const Text('Fijar origen (1°)'),
+                            ],
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Switch(
+                                value: localFixDestination,
+                                onChanged: (v) {
+                                  setSheetState(() => localFixDestination = v);
+                                  setState(() => _fixDestinationLast = v);
+                                },
+                              ),
+                              const Text('Fijar destino (último)'),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Flexible(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: _plannerStops.length,
+                        itemBuilder: (context, index) {
+                          final d = _plannerStops[index];
+                          return ListTile(
+                            dense: true,
+                            leading: CircleAvatar(child: Text('${index + 1}')),
+                            title: Text(d.name),
+                            subtitle: Text(
+                              'Lat: ${d.latitude.toStringAsFixed(5)}, Lng: ${d.longitude.toStringAsFixed(5)}',
+                            ),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () => removeAt(index),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            setState(() {
+                              _plannerStops.clear();
+                              _activeRoute = null;
+                            });
+                            setSheetState(() {});
+                          },
+                          child: const Text('Limpiar selección'),
+                        ),
+                        ElevatedButton.icon(
+                          onPressed: calculate,
+                          icon: const Icon(Icons.alt_route),
+                          label: const Text('Calcular ruta'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (mounted) {
+      setState(() => _plannerActive = false);
+    } else {
+      _plannerActive = false;
+    }
+  }
+}
+
+class _AnimatedLoading extends StatelessWidget {
+  const _AnimatedLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Animated GIF for loading; safe fallback if asset missing
+        Image.asset(
+          'assets/images/loading_search.gif',
+          width: 160,
+          height: 160,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => const SizedBox(
+            width: 48,
+            height: 48,
+            child: CircularProgressIndicator(),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'Buscando ubicaciones...',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      ],
     );
   }
 }
