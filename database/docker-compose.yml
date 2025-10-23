@@ -11,8 +11,60 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: always
+
+  backend:
+    # Opción A: construir con Compose (recomendado para reproducibilidad)
+    #build:
+    #  context: ../backend
+    #  dockerfile: Dockerfile
+    # Opción B: usar imagen ya construida
+    image: backend_app:0.0.1
+    container_name: location-backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/location_tracker
+      SPRING_DATASOURCE_USERNAME: locationapp
+      SPRING_DATASOURCE_PASSWORD: change_me
+      SPRING_PROFILES_ACTIVE: default
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  portainer:
+    image: docker.io/portainer/portainer-ce:alpine-sts
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "9001:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    #networks:
+    #  - management
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512m
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/api/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pg_data:
     driver: local
+  portainer_data:
+    name: portainer_data
+    labels:
+      - "com.docker.compose.project=infrastructure"
+      - "description=Portainer configuration and data"

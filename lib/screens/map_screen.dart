@@ -28,7 +28,12 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   static const int _trackingStartHour = 8; // Inicio permitido (08:00 local)
-  static const int _trackingEndHour = 17; // Fin permitido (17:00 local)
+  static const int _trackingEndHour = 18; // Fin permitido (17:00 local)
+  // Toggle para forzar corte automático al llegar a la hora de fin.
+  // Mantener en false para desactivado (comportamiento actual).
+  // Poner en true para que, si el tracking está activo, se detenga y cierre la app
+  // exactamente a las _trackingEndHour del día local.
+  static const bool _enforceEndHour = false; // cambiar a true para activar
 
   final LocationService _locationService = LocationService();
   final ApiService _apiService = ApiService();
@@ -54,6 +59,9 @@ class _MapScreenState extends State<MapScreen> {
   final Map<String, String> _addressCache = {};
   final Map<String, Future<String>> _addressFutureCache = {};
   StreamSubscription<LocationPoint>? _locationStreamSub;
+  // Timer opcional que, si está habilitado, corta el tracking al llegar al fin de horario
+  // y cierra la aplicación. Desactivado por defecto via _enforceEndHour.
+  Timer? _scheduleEnforcer;
   // Planificador de rutas (Mapbox)
   final MapboxService _mapbox = MapboxService();
   final List<Destination> _plannerStops = [];
@@ -223,6 +231,8 @@ class _MapScreenState extends State<MapScreen> {
       await _locationService.start();
       if (mounted) {
         setState(() => _isTracking = true);
+        // Programa el corte automático al llegar a la hora de fin (si está activado)
+        if (_enforceEndHour) _rescheduleScheduleEnforcer();
         if (!_startNotified) {
           ScaffoldMessenger.of(
             context,
@@ -231,6 +241,7 @@ class _MapScreenState extends State<MapScreen> {
         }
       } else {
         _isTracking = true;
+        if (_enforceEndHour) _rescheduleScheduleEnforcer();
       }
     } catch (e) {
       _showError('Error iniciando tracking: $e');
@@ -239,6 +250,26 @@ class _MapScreenState extends State<MapScreen> {
       } else {
         _showingHistory = false;
       }
+    }
+  }
+
+  // Programa/cancela un timer para cortar al llegar a _trackingEndHour.
+  // Solo se programa si el tracking está activo y _enforceEndHour = true.
+  void _rescheduleScheduleEnforcer() {
+    _scheduleEnforcer?.cancel();
+    if (!_isTracking || !_enforceEndHour) return;
+    final now = DateTime.now();
+    // Si ya estamos fuera de la ventana, cortar de inmediato
+    if (!_isWithinTrackingWindow(now)) {
+      _handleOutsideTrackingHours();
+      return;
+    }
+    final end = DateTime(now.year, now.month, now.day, _trackingEndHour);
+    final duration = end.difference(now);
+    if (duration.isNegative || duration.inSeconds == 0) {
+      _handleOutsideTrackingHours();
+    } else {
+      _scheduleEnforcer = Timer(duration, _handleOutsideTrackingHours);
     }
   }
 
@@ -648,6 +679,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _mapReady = false;
     _locationStreamSub?.cancel();
+    _scheduleEnforcer?.cancel();
     if (_locationService.isTracking) {
       unawaited(_locationService.stop());
     }

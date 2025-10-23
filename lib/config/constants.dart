@@ -27,6 +27,7 @@ class Constants {
       //return 'http://10.0.2.2:8080/api';
       //return 'http://172.20.10.2:8080/api';
       return 'http://192.168.137.1:8080/api'; //Para red compartida
+      //return 'http://172.16.14.40:8080/api'; //Contenedor en WSL
     }
     return 'http://localhost:8080/api';
   }

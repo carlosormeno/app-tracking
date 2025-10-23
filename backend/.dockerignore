@@ -1,0 +1,17 @@
+.git
+.idea
+.vscode
+.DS_Store
+
+# Gradle
+.gradle
+build/
+bin/
+
+# Logs
+*.log
+
+# OS / editor cruft
+**/*.iml
+**/.env
+
