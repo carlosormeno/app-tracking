@@ -28,7 +28,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   static const int _trackingStartHour = 8; // Inicio permitido (08:00 local)
-  static const int _trackingEndHour = 18; // Fin permitido (17:00 local)
+  static const int _trackingEndHour = 17; // Fin permitido (17:00 local)
 
   final LocationService _locationService = LocationService();
   final ApiService _apiService = ApiService();
@@ -158,10 +158,12 @@ class _MapScreenState extends State<MapScreen> {
       if (!ready) {
         if (mounted) {
           setState(() {
-            _connectionMessage = 'No se pudo conectar con el servidor. Reintenta en unos segundos.';
+            _connectionMessage =
+                'No se pudo conectar con el servidor. Reintenta en unos segundos.';
           });
         } else {
-          _connectionMessage = 'No se pudo conectar con el servidor. Reintenta en unos segundos.';
+          _connectionMessage =
+              'No se pudo conectar con el servidor. Reintenta en unos segundos.';
         }
         return;
       }
