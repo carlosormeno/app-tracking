@@ -6,6 +6,7 @@ services:
       POSTGRES_DB: location_tracker
       POSTGRES_USER: locationapp
       POSTGRES_PASSWORD: change_me
+      TZ: America/Lima  # ← Zona horaria de Lima, Perú
     ports:
       - "5432:5432"
     volumes:
@@ -31,6 +32,7 @@ services:
       SPRING_DATASOURCE_USERNAME: locationapp
       SPRING_DATASOURCE_PASSWORD: change_me
       SPRING_PROFILES_ACTIVE: default
+      TZ: America/Lima  # ← Zona horaria de Lima, Perú
     ports:
       - "8080:8080"
     depends_on:
@@ -42,6 +44,8 @@ services:
     image: docker.io/portainer/portainer-ce:alpine-sts
     container_name: portainer
     restart: unless-stopped
+    environment:
+      TZ: America/Lima  # ← Zona horaria de Lima, Perú
     ports:
       - "9001:9000"
     volumes:
