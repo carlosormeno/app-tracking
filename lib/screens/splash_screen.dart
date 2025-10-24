@@ -3,8 +3,7 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-import 'login_screen.dart';
-import 'map_screen.dart';
+import 'auth_gate.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -37,8 +36,9 @@ class _SplashScreenState extends State<SplashScreen>
 
   void _goNext() {
     if (!mounted) return;
-    final user = FirebaseAuth.instance.currentUser;
-    final next = user != null ? const MapScreen() : const LoginScreen();
+    // Ir al AuthGate que escucha cambios de autenticación y navega
+    // automáticamente a Login o Map.
+    const next = AuthGate();
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         pageBuilder: (_, __, ___) => next,
@@ -89,4 +89,3 @@ class _SplashScreenState extends State<SplashScreen>
     );
   }
 }
-
