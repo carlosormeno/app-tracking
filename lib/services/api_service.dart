@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/constants.dart';
 import '../models/location_point.dart';
@@ -21,8 +22,26 @@ class ApiService {
     return Uri.parse('$base$path');
   }
 
-  void updateAuthToken(String? token) {
+  Future<void> updateAuthToken(String? token) async {
     _authToken = token;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (token == null || token.isEmpty) {
+        await prefs.remove('auth_token');
+      } else {
+        await prefs.setString('auth_token', token);
+      }
+    } catch (_) {}
+  }
+
+  static Future<String?> loadSavedAuthToken() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      return (token != null && token.isNotEmpty) ? token : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Map<String, String> _jsonHeaders() {

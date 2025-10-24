@@ -38,7 +38,7 @@ class ForegroundServiceManager {
       foregroundTaskOptions: const ForegroundTaskOptions(
         interval: 60000,
         isOnceEvent: false,
-        autoRunOnBoot: false,
+        autoRunOnBoot: true,
         allowWakeLock: true,
         allowWifiLock: true,
       ),
@@ -56,7 +56,7 @@ class ForegroundServiceManager {
 
     logDebug('Iniciando servicio foreground');
     await FlutterForegroundTask.startService(
-      notificationTitle: 'Tracking activo',
+      notificationTitle: 'Sistema activo',
       notificationText: 'La app está registrando tu ubicación',
       callback: startCallback,
     );
@@ -101,7 +101,7 @@ class LocationTaskHandler extends TaskHandler {
       details: batteryLevel != null ? 'battery=$batteryLevel' : 'battery=?',
     );
     await FlutterForegroundTask.updateService(
-      notificationTitle: 'Tracking activo',
+      notificationTitle: 'Sistema activo',
       notificationText: batteryLevel != null
           ? 'Batería: $batteryLevel%'
           : 'Registrando ubicación en background',

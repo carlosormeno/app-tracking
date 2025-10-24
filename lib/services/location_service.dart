@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 
 import '../models/location_point.dart';
-// import 'foreground_service_manager.dart';
+import 'foreground_service_manager.dart';
 import '../utils/logger.dart';
 
 class LocationServiceException implements Exception {
@@ -70,8 +70,8 @@ class LocationService {
 
     _isTracking = true;
     await _positionSub?.cancel();
-    // logDebug('Activando servicio foreground');
-    // await ForegroundServiceManager.instance.startService();
+    // Activar servicio foreground para mantener tracking en background (Android)
+    await ForegroundServiceManager.instance.startService();
     _positionSub =
         Geolocator.getPositionStream(
           locationSettings: settings ?? _defaultSettings,
@@ -117,7 +117,7 @@ class LocationService {
     await _positionSub?.cancel();
     _positionSub = null;
     _isTracking = false;
-    // await ForegroundServiceManager.instance.stopService();
+    await ForegroundServiceManager.instance.stopService();
   }
 
   Future<LocationPoint?> getCurrentOnce() async {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/auth_service.dart';
 import '../utils/logger.dart';
@@ -17,8 +18,46 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
   String? _errorMessage;
   bool _showPassword = false;
+  bool _rememberUser = false;
 
   final AuthService _authService = AuthService();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRememberedUser();
+  }
+
+  Future<void> _loadRememberedUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    final remember = prefs.getBool('remember_user') ?? false;
+    String? email;
+    if (remember) {
+      email = prefs.getString('remembered_email');
+    }
+    if (mounted) {
+      setState(() {
+        _rememberUser = remember;
+        if (email != null && email.isNotEmpty) {
+          _emailController.text = email;
+        }
+      });
+    } else {
+      _rememberUser = remember;
+      if (email != null && email.isNotEmpty) {
+        _emailController.text = email;
+      }
+    }
+  }
+
+  Future<void> _persistRememberPreference(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('remember_user', value);
+    if (!value) {
+      // Si el usuario desactiva "Recordar", limpiar email almacenado
+      await prefs.remove('remembered_email');
+    }
+  }
 
   @override
   void dispose() {
@@ -48,6 +87,15 @@ class _LoginScreenState extends State<LoginScreen> {
       } else {
         logDebug('Iniciando sesión en Firebase', details: email);
         await _authService.signIn(email: email, password: password);
+      }
+
+      // Persistir preferencia de recordar usuario y email
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('remember_user', _rememberUser);
+      if (_rememberUser) {
+        await prefs.setString('remembered_email', email);
+      } else {
+        await prefs.remove('remembered_email');
       }
     } on Exception catch (e) {
       logError('Error en autenticación', error: e);
@@ -103,6 +151,24 @@ class _LoginScreenState extends State<LoginScreen> {
                   },
                 ),
                 const Text('Ver contraseña'),
+              ],
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: [
+                Checkbox(
+                  value: _rememberUser,
+                  onChanged: (v) {
+                    final newVal = v ?? false;
+                    setState(() => _rememberUser = newVal);
+                    // Guardar inmediatamente la preferencia de recordar
+                    // (se mantiene tras cerrar sesión)
+                    // No esperamos el Future para no bloquear la UI.
+                    // ignore: discarded_futures
+                    _persistRememberPreference(newVal);
+                  },
+                ),
+                const Text('Recordar usuario'),
               ],
             ),
             if (_errorMessage != null) ...[

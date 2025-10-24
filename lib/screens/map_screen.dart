@@ -157,7 +157,7 @@ class _MapScreenState extends State<MapScreen> {
       if (token == null) {
         logDebug('No se pudo obtener ID token de Firebase');
       }
-      _apiService.updateAuthToken(token);
+      await _apiService.updateAuthToken(token);
       setState(() {
         _firebaseUid = uid;
         _email = email;
@@ -173,7 +173,7 @@ class _MapScreenState extends State<MapScreen> {
           _connectionMessage =
               'No se pudo conectar con el servidor. Reintenta en unos segundos.';
         }
-        return;
+        // Continuar con el tracking en modo offline: se encolarán puntos
       }
       if (!_isWithinTrackingWindow(DateTime.now())) {
         _handleOutsideTrackingHours();
@@ -326,7 +326,7 @@ class _MapScreenState extends State<MapScreen> {
     }
     try {
       final token = await IdentityService().getIdToken();
-      _apiService.updateAuthToken(token);
+      await _apiService.updateAuthToken(token);
       if (token == null) {
         logDebug('ID token nulo durante el registro');
       }
@@ -348,7 +348,8 @@ class _MapScreenState extends State<MapScreen> {
 
   void _syncLocation(LocationPoint point) {
     final uid = _firebaseUid;
-    if (!_backendReady || uid == null) return;
+    // Permitir encolar incluso si el backend no está listo (offline/registro pendiente)
+    if (uid == null) return;
     unawaited(() async {
       try {
         await _syncManager.sendOrQueue(firebaseUid: uid, point: point);
@@ -958,7 +959,7 @@ class _MapScreenState extends State<MapScreen> {
                     setState(() => _isTracking = false);
                   }
                 }
-                _apiService.updateAuthToken(null);
+                await _apiService.updateAuthToken(null);
                 await AuthService().signOut();
               }
             },

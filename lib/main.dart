@@ -5,19 +5,29 @@ import 'package:flutter/material.dart';
 import 'firebase_options.dart';
 import 'screens/login_screen.dart';
 import 'screens/map_screen.dart';
+import 'screens/splash_screen.dart';
 import 'services/auth_service.dart';
 import 'services/foreground_service_manager.dart';
+import 'services/background_tasks.dart';
+import 'package:workmanager/workmanager.dart';
 import 'utils/logger.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   logDebug('Inicializando servicios foreground');
   await ForegroundServiceManager.instance.init();
+  // Inicializa tareas en background (WorkManager) para flush de cola offline
+  try {
+    await Workmanager().initialize(backgroundTaskDispatcher, isInDebugMode: false);
+    await registerBackgroundTasks();
+  } catch (e, stack) {
+    logError('Error inicializando WorkManager', error: e, stackTrace: stack);
+  }
 
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
-    );
+      );
     logDebug('Firebase inicializado correctamente');
   } catch (e, stack) {
     logError('Error inicializando Firebase', error: e, stackTrace: stack);
@@ -41,22 +51,7 @@ class LocationTrackerApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: StreamBuilder<User?>(
-        stream: AuthService().authStateChanges,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
-          }
-
-          if (snapshot.hasData) {
-            return const MapScreen();
-          }
-
-          return const LoginScreen();
-        },
-      ),
+      home: const SplashScreen(),
     );
   }
 }

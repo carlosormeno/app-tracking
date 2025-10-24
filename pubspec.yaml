@@ -46,6 +46,7 @@ dependencies:
   geocoding: ^2.1.1
   share_plus: ^7.2.1
   url_launcher: ^6.3.0
+  workmanager: ^0.9.0+3
 
 dev_dependencies:
   flutter_test:
@@ -58,6 +59,7 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
   flutter_launcher_icons: ^0.13.1
+  image: ^4.1.7
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -104,5 +106,11 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: assets/images/onp_logo.png
-  remove_alpha_ios: true
+  image_path: assets/icons/icon_legacy.png
+  # Adaptive icon configuration (Android 8+)
+  adaptive_icon_background: assets/icons/icon_bg.png
+  adaptive_icon_foreground: assets/icons/icon_fg_padded.png
+  # Optional monochrome for Android 13+:
+  # adaptive_icon_monochrome: assets/icons/icon_mono.png
+  # Keep legacy for older devices automatically
+  min_sdk_android: 21
