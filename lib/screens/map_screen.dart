@@ -216,6 +216,24 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  void _zoomBy(double delta) {
+    if (!_mapReady) return;
+    try {
+      final camera = _mapController.camera;
+      final newZoom = (camera.zoom + delta).clamp(1.0, 19.0);
+      _mapController.move(camera.center, newZoom);
+    } catch (error, stackTrace) {
+      logError(
+        'No se pudo ajustar el zoom',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  void _zoomIn() => _zoomBy(1.0);
+  void _zoomOut() => _zoomBy(-1.0);
+
   Future<void> _startTracking({bool ensureBackend = true}) async {
     if (_isTracking) return;
     if (!_isWithinTrackingWindow(DateTime.now())) {
@@ -1188,8 +1206,31 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
               ),
-            ),
+          ),
           if (_isLoading) const Center(child: _AnimatedLoading()),
+          // Controles de zoom (+/-)
+          Positioned(
+            bottom: 20,
+            left: 16,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: null,
+                  onPressed: _mapReady ? _zoomIn : null,
+                  tooltip: 'Acercar',
+                  child: const Icon(Icons.add),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: null,
+                  onPressed: _mapReady ? _zoomOut : null,
+                  tooltip: 'Alejar',
+                  child: const Icon(Icons.remove),
+                ),
+              ],
+            ),
+          ),
           if (_activeRoute != null)
             Positioned(
               bottom: 20,

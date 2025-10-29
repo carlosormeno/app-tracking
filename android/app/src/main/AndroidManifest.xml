@@ -38,20 +38,7 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- Foreground location service for background tracking -->
-        <service
-            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="location"
-            android:exported="false" />
-        <!-- Receive boot to auto-run foreground service when configured -->
-        <receiver
-            android:name="com.pravera.flutter_foreground_task.receiver.BootReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
+        <!-- flutter_foreground_task declares its own service/receivers via manifest-merging. -->
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
