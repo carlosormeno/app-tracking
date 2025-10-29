@@ -18,6 +18,14 @@ import '../models/route_models.dart';
 import '../services/mapbox_service.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../models/assigned_visit.dart';
+import '../services/mock_schedule_service.dart';
+import 'assigned_visits_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'verification_form_screen.dart';
+import '../services/audit_service.dart';
+
+enum BaseLayer { streets, satellite, outdoors }
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -74,6 +82,26 @@ class _MapScreenState extends State<MapScreen> {
   bool _useCurrentAsOrigin = true;
   bool _startNotified = false;
   bool _selectingOnMap = false;
+  bool _routeInProgress = false;
+  // Base map layer selection
+  BaseLayer _baseLayer = BaseLayer.streets;
+  // Arrival detection and dwell monitoring
+  LatLng? _currentTarget;
+  double _arrivalRadiusMeters = 50.0;
+  Duration _dwellDuration = const Duration(minutes: 5);
+  bool _arrivalConfirmed = false;
+  bool _wasInsideArrivalZone = false;
+  bool _dwellInProgress = false;
+  DateTime? _dwellEndsAt;
+  Timer? _dwellTimer;
+  Timer? _dwellTick;
+  LatLng? _arrivalRefPoint;
+  bool _schedulePromptShown = false;
+  // Today visits tracking
+  List<AssignedVisit> _todayVisits = [];
+  int _currentVisitIndex = -1;
+  bool _verificationInProgress = false;
+  final Set<String> _completedVisitIds = <String>{};
 
   String? _nearbyBboxString(LatLng center, double deltaDegrees) {
     final minLat = center.latitude - deltaDegrees;
@@ -129,6 +157,7 @@ class _MapScreenState extends State<MapScreen> {
       });
       _moveCameraTo(point);
       _syncLocation(p);
+      _handleArrivalMonitoring(point);
     });
   }
 
@@ -179,6 +208,21 @@ class _MapScreenState extends State<MapScreen> {
         _handleOutsideTrackingHours();
         return;
       }
+      // Load adjustable settings (arrival radius, dwell minutes) and base layer
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final r = prefs.getDouble('arrival_radius_m');
+        final m = prefs.getInt('dwell_minutes');
+        final bl = prefs.getString('base_layer');
+        if (r != null) _arrivalRadiusMeters = r;
+        if (m != null) _dwellDuration = Duration(minutes: m);
+        if (bl != null) {
+          _baseLayer = BaseLayer.values.firstWhere(
+            (e) => e.name == bl,
+            orElse: () => BaseLayer.streets,
+          );
+        }
+      } catch (_) {}
       final p = await _locationService.getCurrentOnce();
       if (p != null) {
         setState(() {
@@ -192,6 +236,13 @@ class _MapScreenState extends State<MapScreen> {
       _addressCache.clear();
       _addressFutureCache.clear();
       await _startTracking(ensureBackend: false);
+      // Show schedule prompt after first frame
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_schedulePromptShown) {
+          _schedulePromptShown = true;
+          _maybeShowSchedulePrompt();
+        }
+      });
     } catch (e) {
       _showError('Error inicializando: $e');
     } finally {
@@ -200,6 +251,807 @@ class _MapScreenState extends State<MapScreen> {
       }
       logDebug('Bootstrap completado');
     }
+  }
+
+  void _handleArrivalMonitoring(LatLng current) {
+    final target = _currentTarget;
+    if (target == null) return;
+    final d = Distance().as(LengthUnit.Meter, current, target);
+    final inside = d <= _arrivalRadiusMeters;
+    if (inside && !_wasInsideArrivalZone && !_arrivalConfirmed) {
+      _promptArrivalConfirmation(current);
+    }
+    _wasInsideArrivalZone = inside;
+
+    // If dwelling, ensure still within radius of reference point
+    if (_dwellInProgress) {
+      final ref = _arrivalRefPoint ?? target;
+      final moved = Distance().as(LengthUnit.Meter, current, ref);
+      if (moved > _arrivalRadiusMeters) {
+        _onMovedBeyondRadius();
+      }
+    }
+  }
+
+  Future<void> _promptArrivalConfirmation(LatLng current) async {
+    if (!mounted) return;
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Llegaste a tu destino?'),
+        content: const Text(
+          'Te encuentras dentro del radio de 50 m del destino.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sí'),
+          ),
+        ],
+      ),
+    );
+    if (yes == true && mounted) {
+      setState(() {
+        _arrivalConfirmed = true;
+        _arrivalRefPoint = current;
+        _activeRoute = null;
+        _routeInProgress = false;
+      });
+      // Audit arrival
+      final v =
+          (_currentVisitIndex >= 0 && _currentVisitIndex < _todayVisits.length)
+          ? _todayVisits[_currentVisitIndex]
+          : null;
+      unawaited(
+        AuditService.instance.logEvent('arrival', {
+          'visitId': v?.id,
+          'lat': current.latitude,
+          'lng': current.longitude,
+          'radius_m': _arrivalRadiusMeters,
+        }),
+      );
+      _startDwellMonitoring();
+    }
+  }
+
+  void _startDwellMonitoring() {
+    _dwellTimer?.cancel();
+    _dwellTick?.cancel();
+    setState(() {
+      _dwellInProgress = true;
+      _dwellEndsAt = DateTime.now().add(_dwellDuration);
+    });
+    _dwellTimer = Timer(_dwellDuration, _onDwellTimerComplete);
+    _dwellTick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  Future<void> _onDwellTimerComplete() async {
+    _dwellTick?.cancel();
+    if (!mounted) return;
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tiempo cumplido'),
+        content: const Text('¿Deseas iniciar la labor de verificación?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('No aún'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Iniciar'),
+          ),
+        ],
+      ),
+    );
+    if (proceed == true) {
+      _startVerificationForCurrent();
+    }
+  }
+
+  Future<void> _onMovedBeyondRadius() async {
+    if (!mounted) return;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Te alejaste del destino'),
+        content: const Text(
+          '¿Vas a continuar con el siguiente destino o deseas ampliar el rango de espera a 100 m?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('continue'),
+            child: const Text('Continuar siguiente'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('expand'),
+            child: const Text('Ampliar a 100 m'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop('stay'),
+            child: const Text('Seguir esperando'),
+          ),
+        ],
+      ),
+    );
+    if (action == 'continue') {
+      unawaited(
+        AuditService.instance.logEvent('exit_radius', {
+          'lat': _center.latitude,
+          'lng': _center.longitude,
+          'radius_m': _arrivalRadiusMeters,
+          'visitIndex': _currentVisitIndex,
+        }),
+      );
+      _cancelDwellMonitoring();
+      setState(() {
+        _arrivalConfirmed = false;
+        _arrivalRefPoint = null;
+        _verificationInProgress =
+            false; // Mantener _currentTarget para referencia o limpiarlo si así se prefiere
+        _currentTarget = null;
+      });
+      await _advanceToNextVisit();
+    } else if (action == 'expand') {
+      setState(() => _arrivalRadiusMeters = 100.0);
+      unawaited(
+        AuditService.instance.logEvent('radius_changed', {
+          'radius_m': _arrivalRadiusMeters,
+        }),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Rango de espera ampliado a 100 m.')),
+      );
+    } // else 'stay' => no action
+  }
+
+  void _cancelDwellMonitoring() {
+    _dwellTimer?.cancel();
+    _dwellTick?.cancel();
+    setState(() {
+      _dwellInProgress = false;
+      _dwellEndsAt = null;
+    });
+  }
+
+  void _startVerificationForCurrent() {
+    _cancelDwellMonitoring();
+    setState(() {
+      _arrivalConfirmed = false;
+    });
+    final v =
+        (_currentVisitIndex >= 0 && _currentVisitIndex < _todayVisits.length)
+        ? _todayVisits[_currentVisitIndex]
+        : null;
+    unawaited(
+      AuditService.instance.logEvent('start_verification', {
+        'visitId': v?.id,
+        'lat': _center.latitude,
+        'lng': _center.longitude,
+      }),
+    );
+    if (v != null) {
+      _openVerificationForm(v);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No hay visita activa para verificar')),
+      );
+    }
+  }
+
+  Future<void> _openVerificationForm(AssignedVisit visit) async {
+    setState(() => _verificationInProgress = true);
+    final completed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => VerificationFormScreen(visit: visit)),
+    );
+    setState(() => _verificationInProgress = false);
+    if (completed == true) {
+      _completedVisitIds.add(visit.id);
+      if (!mounted) return;
+      final goNext = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Verificación completada'),
+          content: const Text('¿Deseas pasar a la siguiente visita?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('No'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Sí, siguiente'),
+            ),
+          ],
+        ),
+      );
+      if (goNext == true) {
+        await _advanceToNextVisit();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Verificación marcada como completada')),
+        );
+      }
+    }
+  }
+
+  void _markRouteStarted() {
+    if (_routeInProgress) return;
+    setState(() => _routeInProgress = true);
+    unawaited(
+      AuditService.instance.logEvent('route_started', {
+        'lat': _center.latitude,
+        'lng': _center.longitude,
+        'visitIndex': _currentVisitIndex,
+      }),
+    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Recorrido iniciado')));
+  }
+
+  Future<void> _advanceToNextVisit() async {
+    if (_todayVisits.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No hay destinos en la programación.')),
+      );
+      return;
+    }
+    // Marca actual y elige el siguiente con reglas de prioridad
+    unawaited(
+      AuditService.instance.logEvent('continue_to_next', {
+        'fromIndex': _currentVisitIndex,
+      }),
+    );
+    if (_currentVisitIndex >= 0 && _currentVisitIndex < _todayVisits.length) {
+      _completedVisitIds.add(_todayVisits[_currentVisitIndex].id);
+    }
+    _verificationInProgress = false;
+    _routeInProgress = false;
+
+    final nextIndex = await _chooseNextVisitIndex();
+    if (nextIndex == -1) {
+      setState(() {
+        _currentTarget = null;
+        _activeRoute = null;
+      });
+      await _onAllVisitsCompleted();
+      return;
+    }
+    setState(() {
+      _currentVisitIndex = nextIndex;
+    });
+    final next = _todayVisits[_currentVisitIndex];
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Siguiente destino: ${next.name}')));
+    await _proposeInitialAlternatives([next]);
+  }
+
+  Future<int> _chooseNextVisitIndex() async {
+    // Indices pendientes no completados (distintos al actual)
+    final remaining = <int>[];
+    for (var i = 0; i < _todayVisits.length; i++) {
+      if (i != _currentVisitIndex &&
+          !_completedVisitIds.contains(_todayVisits[i].id)) {
+        remaining.add(i);
+      }
+    }
+    if (remaining.isEmpty) return -1;
+    remaining.sort();
+    final nextByOrder = remaining.first;
+    final nextVisit = _todayVisits[nextByOrder];
+    // Prioridad 1: la siguiente confirmada no se salta
+    if (nextVisit.confirmed) return nextByOrder;
+    // Prioridad 2: proximidad entre no confirmadas
+    final nonConfirmed = remaining
+        .where((i) => !_todayVisits[i].confirmed)
+        .toList();
+    if (nonConfirmed.isEmpty) return nextByOrder;
+
+    final d = Distance();
+    double dTo(int idx) => d.as(
+      LengthUnit.Meter,
+      _center,
+      LatLng(_todayVisits[idx].latitude, _todayVisits[idx].longitude),
+    );
+    nonConfirmed.sort((a, b) => dTo(a).compareTo(dTo(b)));
+    final nearest = nonConfirmed.first;
+    final nearestDist = dTo(nearest);
+    final secondDist = nonConfirmed.length > 1 ? dTo(nonConfirmed[1]) : null;
+    const tieEps = 30.0; // metros
+    if (nearest == nextByOrder) return nextByOrder;
+    if (secondDist != null && (secondDist - nearestDist).abs() <= tieEps) {
+      final choice = await showDialog<int>(
+        context: context,
+        builder: (ctx) {
+          final a = _todayVisits[nearest];
+          final b = _todayVisits[nonConfirmed[1]];
+          return SimpleDialog(
+            title: const Text('Distancia similar'),
+            children: [
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(ctx).pop(nearest),
+                child: Text('${a.name} (~${nearestDist.toStringAsFixed(0)} m)'),
+              ),
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(ctx).pop(nonConfirmed[1]),
+                child: Text('${b.name} (~${secondDist!.toStringAsFixed(0)} m)'),
+              ),
+              const Divider(height: 1),
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(ctx).pop(nextByOrder),
+                child: Text('Mantener orden: ${nextVisit.name}'),
+              ),
+            ],
+          );
+        },
+      );
+      return choice ?? nextByOrder;
+    }
+
+    final proposed = _todayVisits[nearest];
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Optimizar por proximidad'),
+        content: Text(
+          'Se propone ir primero a "${proposed.name}" (aprox. ${nearestDist.toStringAsFixed(0)} m).',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Mantener: ${nextVisit.name}'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Ir al más cercano'),
+          ),
+        ],
+      ),
+    );
+    return ok == true ? nearest : nextByOrder;
+  }
+
+  Future<void> _maybeShowSchedulePrompt() async {
+    if (!mounted) return;
+    var visits = await MockScheduleService().fetchTodayVisits();
+    // Aplicar orden guardado si existe
+    try {
+      final uid = _firebaseUid;
+      if (uid != null) {
+        visits = await _applySavedOrder(uid, visits);
+      }
+    } catch (_) {}
+    if (visits.isEmpty) return;
+    if (!mounted) return;
+    if (!context.mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Programación de hoy'),
+        content: Text(
+          'Tienes ${visits.length} visitas programadas para hoy. ¿Deseas revisar y confirmar el orden?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Más tarde'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Ver programación'),
+          ),
+        ],
+      ),
+    );
+    if (go == true && mounted) {
+      final ordered = await Navigator.of(context).push<List<AssignedVisit>>(
+        MaterialPageRoute(
+          builder: (_) => AssignedVisitsScreen(
+            initialVisits: visits,
+            completedIds: _completedVisitIds,
+          ),
+        ),
+      );
+      if (ordered != null && ordered.isNotEmpty && mounted) {
+        // Guardar orden confirmado
+        final uid = _firebaseUid;
+        if (uid != null) {
+          await _saveOrder(uid, ordered.map((e) => e.id).toList());
+        }
+        setState(() {
+          _todayVisits = ordered;
+          _currentVisitIndex = 0;
+        });
+        await _proposeInitialAlternatives([ordered.first]);
+      }
+    }
+  }
+
+  Future<void> _proposeInitialAlternatives(List<AssignedVisit> visits) async {
+    if (visits.isEmpty) return;
+    final first = visits.first;
+    setState(() {
+      _currentTarget = LatLng(first.latitude, first.longitude);
+      _arrivalConfirmed = false;
+      _wasInsideArrivalZone = false;
+      _routeInProgress = false;
+    });
+    // Evaluate arrival immediately in case user is already within radius
+    _handleArrivalMonitoring(_center);
+    try {
+      final routes = await _mapbox.directionsAlternatives(
+        mode: _routingMode,
+        origin: _center,
+        destination: LatLng(first.latitude, first.longitude),
+        maxAlternatives: 4,
+      );
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<int>(
+        context: context,
+        builder: (ctx) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Rutas sugeridas al primer destino',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: routes.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final r = routes[index];
+                        final coords = r.coordinates;
+                        final mid = coords.isNotEmpty
+                            ? coords[coords.length ~/ 2]
+                            : _center;
+                        return InkWell(
+                          onTap: () => Navigator.of(context).pop(index),
+                          child: Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  SizedBox(
+                                    height: 120,
+                                    child: FlutterMap(
+                                      options: MapOptions(
+                                        initialCenter: mid,
+                                        initialZoom: 12,
+                                        interactionOptions:
+                                            const InteractionOptions(
+                                              flags: InteractiveFlag.none,
+                                            ),
+                                      ),
+                                      children: [
+                                        TileLayer(
+                                          urlTemplate: MapboxConfig.isConfigured
+                                              ? 'https://api.mapbox.com/styles/v1/{styleId}/tiles/256/{z}/{x}/{y}@2x?access_token={accessToken}'
+                                              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                          additionalOptions:
+                                              MapboxConfig.isConfigured
+                                              ? {
+                                                  'accessToken':
+                                                      MapboxConfig.accessToken,
+                                                  'styleId':
+                                                      MapboxConfig.styleId,
+                                                }
+                                              : const <String, String>{},
+                                          userAgentPackageName:
+                                              'com.example.flutter_application_1',
+                                        ),
+                                        if (coords.isNotEmpty)
+                                          PolylineLayer(
+                                            polylines: [
+                                              Polyline(
+                                                points: coords,
+                                                color: Colors.deepPurple,
+                                                strokeWidth: 4,
+                                              ),
+                                            ],
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text('Opción ${index + 1}'),
+                                      Text(
+                                        '${(r.distanceMeters / 1000).toStringAsFixed(2)} km • ${(r.durationSeconds / 60).toStringAsFixed(0)} min',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).pop(-1);
+                          _openExternalTo(
+                            LatLng(first.latitude, first.longitude),
+                          );
+                        },
+                        icon: const Icon(Icons.map),
+                        label: const Text('Abrir en Google Maps'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(-1),
+                        child: const Text('Usar mi propia ruta'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+      if (!mounted) return;
+      if (chosen == null) return;
+      if (chosen >= 0 && chosen < routes.length) {
+        setState(() => _activeRoute = routes[chosen]);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Se muestra una ruta sugerida. Puedes navegar libremente.',
+            ),
+          ),
+        );
+      } else {
+        setState(() => _activeRoute = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Usa tu propia ruta. El sistema no registra la elección.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      _showError('No se pudieron obtener alternativas: $e');
+    }
+  }
+
+  Future<void> _proposeAlternativesToLatLng(LatLng destination) async {
+    setState(() {
+      _currentTarget = destination;
+      _arrivalConfirmed = false;
+      _wasInsideArrivalZone = false;
+      _routeInProgress = false;
+    });
+    _handleArrivalMonitoring(_center);
+    try {
+      final routes = await _mapbox.directionsAlternatives(
+        mode: _routingMode,
+        origin: _center,
+        destination: destination,
+        maxAlternatives: 4,
+      );
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<int>(
+        context: context,
+        builder: (ctx) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Rutas sugeridas al destino actual',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: routes.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final r = routes[index];
+                        final coords = r.coordinates;
+                        final mid = coords.isNotEmpty
+                            ? coords[coords.length ~/ 2]
+                            : _center;
+                        return InkWell(
+                          onTap: () => Navigator.of(context).pop(index),
+                          child: Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  SizedBox(
+                                    height: 120,
+                                    child: FlutterMap(
+                                      options: MapOptions(
+                                        initialCenter: mid,
+                                        initialZoom: 12,
+                                        interactionOptions:
+                                            const InteractionOptions(
+                                              flags: InteractiveFlag.none,
+                                            ),
+                                      ),
+                                      children: [
+                                        TileLayer(
+                                          urlTemplate: MapboxConfig.isConfigured
+                                              ? 'https://api.mapbox.com/styles/v1/{styleId}/tiles/256/{z}/{x}/{y}@2x?access_token={accessToken}'
+                                              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                          additionalOptions:
+                                              MapboxConfig.isConfigured
+                                              ? {
+                                                  'accessToken':
+                                                      MapboxConfig.accessToken,
+                                                  'styleId':
+                                                      MapboxConfig.styleId,
+                                                }
+                                              : const <String, String>{},
+                                          userAgentPackageName:
+                                              'com.example.flutter_application_1',
+                                        ),
+                                        if (coords.isNotEmpty)
+                                          PolylineLayer(
+                                            polylines: [
+                                              Polyline(
+                                                points: coords,
+                                                color: Colors.deepPurple,
+                                                strokeWidth: 4,
+                                              ),
+                                            ],
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text('Opción ${index + 1}'),
+                                      Text(
+                                        '${(r.distanceMeters / 1000).toStringAsFixed(2)} km • ${(r.durationSeconds / 60).toStringAsFixed(0)} min',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).pop(-1);
+                          _openExternalTo(destination);
+                        },
+                        icon: const Icon(Icons.map),
+                        label: const Text('Abrir en Google Maps'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(-1),
+                        child: const Text('Usar mi propia ruta'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+      if (!mounted) return;
+      if (chosen == null) return;
+      if (chosen >= 0 && chosen < routes.length) {
+        setState(() => _activeRoute = routes[chosen]);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Se muestra una ruta sugerida. Puedes navegar libremente.',
+            ),
+          ),
+        );
+      } else {
+        setState(() => _activeRoute = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Usa tu propia ruta. El sistema no registra la elección.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      _showError('No se pudieron obtener alternativas: $e');
+    }
+  }
+
+  Future<void> _openExternalTo(LatLng destination) async {
+    final mode = _routingMode == RoutingMode.walking ? 'walking' : 'driving';
+    final originParam = 'origin=Current+Location';
+    final destinationParam =
+        'destination=${destination.latitude},${destination.longitude}';
+    final uri = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&$originParam&$destinationParam&travelmode=$mode',
+    );
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      _showError('No se pudo abrir Google Maps');
+    }
+  }
+
+  Future<List<AssignedVisit>> _applySavedOrder(
+    String uid,
+    List<AssignedVisit> visits,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = _orderKey(uid);
+    final saved = prefs.getStringList(key);
+    if (saved == null || saved.isEmpty) return visits;
+    final byId = {for (final v in visits) v.id: v};
+    final reordered = <AssignedVisit>[];
+    for (final id in saved) {
+      final v = byId.remove(id);
+      if (v != null) reordered.add(v);
+    }
+    // Append any new or missing visits at the end
+    reordered.addAll(byId.values);
+    return reordered;
+  }
+
+  Future<void> _saveOrder(String uid, List<String> ids) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_orderKey(uid), ids);
+  }
+
+  String _orderKey(String uid) {
+    final now = DateTime.now();
+    final date =
+        '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    return 'schedule_order:$uid:$date';
   }
 
   void _moveCameraTo(LatLng target) {
@@ -699,6 +1551,8 @@ class _MapScreenState extends State<MapScreen> {
     _mapReady = false;
     _locationStreamSub?.cancel();
     _scheduleEnforcer?.cancel();
+    _dwellTimer?.cancel();
+    _dwellTick?.cancel();
     if (_locationService.isTracking) {
       unawaited(_locationService.stop());
     }
@@ -753,6 +1607,280 @@ class _MapScreenState extends State<MapScreen> {
         });
     _addressFutureCache[key] = future;
     return future;
+  }
+
+  String _formatRemaining(DateTime endsAt) {
+    final now = DateTime.now();
+    final remaining = endsAt.difference(now);
+    final secs = remaining.inSeconds.clamp(0, 24 * 60 * 60);
+    final mm = (secs ~/ 60).toString().padLeft(2, '0');
+    final ss = (secs % 60).toString().padLeft(2, '0');
+    return '$mm:$ss';
+  }
+
+  Future<void> _openSettings() async {
+    final radiusController = TextEditingController(
+      text: _arrivalRadiusMeters.toStringAsFixed(0),
+    );
+    final dwellController = TextEditingController(
+      text: _dwellDuration.inMinutes.toString(),
+    );
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            left: 16,
+            right: 16,
+            top: 12,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Ajustes', style: Theme.of(ctx).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              TextField(
+                controller: radiusController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Radio de llegada (m)',
+                  helperText: 'Recomendado 50–100 m',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: dwellController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Tiempo de espera (min)',
+                  helperText: 'Recomendado 3–10 min',
+                ),
+              ),
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerRight,
+                child: ElevatedButton(
+                  onPressed: () async {
+                    final r = double.tryParse(radiusController.text.trim());
+                    final m = int.tryParse(dwellController.text.trim());
+                    if (r == null || r <= 0 || m == null || m <= 0) {
+                      Navigator.of(ctx).pop();
+                      _showError('Valores no válidos');
+                      return;
+                    }
+                    setState(() {
+                      _arrivalRadiusMeters = r.clamp(10, 500);
+                      _dwellDuration = Duration(minutes: m.clamp(1, 60));
+                    });
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setDouble(
+                      'arrival_radius_m',
+                      _arrivalRadiusMeters,
+                    );
+                    await prefs.setInt(
+                      'dwell_minutes',
+                      _dwellDuration.inMinutes,
+                    );
+                    unawaited(
+                      AuditService.instance.logEvent('settings_update', {
+                        'arrival_radius_m': _arrivalRadiusMeters,
+                        'dwell_minutes': _dwellDuration.inMinutes,
+                      }),
+                    );
+                    if (mounted) {
+                      Navigator.of(ctx).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Ajustes guardados')),
+                      );
+                    }
+                  },
+                  child: const Text('Guardar'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openTodaySchedule() async {
+    if (_todayVisits.isEmpty) {
+      _showError('No hay programación cargada.');
+      return;
+    }
+    final updated = await Navigator.of(context).push<List<AssignedVisit>>(
+      MaterialPageRoute(
+        builder: (_) => AssignedVisitsScreen(
+          initialVisits: _todayVisits,
+          completedIds: _completedVisitIds,
+        ),
+      ),
+    );
+    if (updated != null && updated.isNotEmpty) {
+      setState(() => _todayVisits = updated);
+      final uid = _firebaseUid;
+      if (uid != null) {
+        await _saveOrder(uid, updated.map((e) => e.id).toList());
+      }
+    }
+  }
+
+  String _activeStyleId() {
+    switch (_baseLayer) {
+      case BaseLayer.satellite:
+        return 'mapbox/satellite-v9';
+      case BaseLayer.outdoors:
+        return 'mapbox/outdoors-v12';
+      case BaseLayer.streets:
+      default:
+        return 'mapbox/streets-v11';
+    }
+  }
+
+  Future<void> _setBaseLayer(BaseLayer v) async {
+    if (!mounted) return;
+    setState(() => _baseLayer = v);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('base_layer', _baseLayer.name);
+  }
+
+  Future<void> _openLayersSelector() async {
+    final selected = await showDialog<BaseLayer>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Capas del mapa'),
+        children: [
+          RadioListTile<BaseLayer>(
+            value: BaseLayer.streets,
+            groupValue: _baseLayer,
+            onChanged: (v) => Navigator.of(ctx).pop(v),
+            title: const Text('Calles'),
+          ),
+          RadioListTile<BaseLayer>(
+            value: BaseLayer.satellite,
+            groupValue: _baseLayer,
+            onChanged: (v) => Navigator.of(ctx).pop(v),
+            title: const Text('Satélite'),
+          ),
+          RadioListTile<BaseLayer>(
+            value: BaseLayer.outdoors,
+            groupValue: _baseLayer,
+            onChanged: (v) => Navigator.of(ctx).pop(v),
+            title: const Text('Relieve'),
+          ),
+        ],
+      ),
+    );
+    if (selected != null && mounted) {
+      setState(() => _baseLayer = selected);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('base_layer', _baseLayer.name);
+    }
+  }
+
+  bool _isInsideArrivalZoneNow() {
+    final target = _currentTarget;
+    if (target == null) return false;
+    final d = Distance().as(LengthUnit.Meter, _center, target);
+    return d <= _arrivalRadiusMeters;
+  }
+
+  Future<void> _onAllVisitsCompleted() async {
+    final total = _todayVisits.length;
+    final completed = _completedVisitIds.length;
+    String fmt(DateTime d) =>
+        '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    DateTime? startAt;
+    DateTime endAt = DateTime.now();
+    try {
+      final events = await AuditService.instance.getEvents();
+      // Find earliest relevant event of today
+      final today = DateTime.now();
+      final dayStart = DateTime(today.year, today.month, today.day);
+      final dayEnd = dayStart.add(const Duration(days: 1));
+      for (final e in events) {
+        final ts = DateTime.tryParse(e['timestamp'] as String? ?? '');
+        if (ts == null) continue;
+        if (ts.isBefore(dayStart) || !ts.isBefore(dayEnd)) continue;
+        final type = e['type'] as String? ?? '';
+        if (type == 'arrival' || type == 'start_verification') {
+          if (startAt == null || ts.isBefore(startAt!)) startAt = ts;
+        }
+      }
+    } catch (_) {}
+    final durationLabel = startAt != null
+        ? '${fmt(startAt!)} - ${fmt(endAt)} (${endAt.difference(startAt!).inMinutes} min)'
+        : 'Duración: N/D';
+
+    final summaryLines = <String>[
+      'Jornada finalizada',
+      'Completadas: $completed / $total',
+      durationLabel,
+      '',
+      'Visitas:',
+      ..._todayVisits.map(
+        (v) => '${_completedVisitIds.contains(v.id) ? '[x]' : '[ ]'} ${v.name}',
+      ),
+    ];
+    final summaryText = summaryLines.join('\n');
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Jornada finalizada'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Completadas: $completed / $total'),
+            const SizedBox(height: 4),
+            Text(durationLabel),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 120,
+              width: double.maxFinite,
+              child: ListView(
+                children: _todayVisits
+                    .map(
+                      (v) => Row(
+                        children: [
+                          Icon(
+                            _completedVisitIds.contains(v.id)
+                                ? Icons.check_circle
+                                : Icons.radio_button_unchecked,
+                            size: 16,
+                            color: _completedVisitIds.contains(v.id)
+                                ? Colors.green
+                                : Colors.grey,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(child: Text(v.name)),
+                        ],
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Share.share(summaryText, subject: 'Resumen de jornada'),
+            child: const Text('Compartir'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cerrar'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<String> _fetchAddress(LocationPoint point) async {
@@ -837,9 +1965,14 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _shareActiveRoute() async {
     final route = _activeRoute;
     if (route == null) return;
-    final modeLabel = _routingMode == RoutingMode.walking
-        ? 'Caminar'
-        : 'Conducir';
+    String modeLabel;
+    if (_routingMode == RoutingMode.walking) {
+      modeLabel = 'Caminar';
+    } else if (_routingMode == RoutingMode.drivingTraffic) {
+      modeLabel = 'Conducir (tráfico)';
+    } else {
+      modeLabel = 'Conducir';
+    }
     final buffer = StringBuffer()
       ..writeln('Ruta ($modeLabel)')
       ..writeln(
@@ -958,6 +2091,35 @@ class _MapScreenState extends State<MapScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
+              if (value == 'settings') {
+                await _openSettings();
+                return;
+              }
+              if (value == 'today_schedule') {
+                await _openTodaySchedule();
+                return;
+              }
+              if (value == 'alternatives_current') {
+                LatLng? dest = _currentTarget;
+                if (dest == null &&
+                    _currentVisitIndex >= 0 &&
+                    _currentVisitIndex < _todayVisits.length) {
+                  final v = _todayVisits[_currentVisitIndex];
+                  dest = LatLng(v.latitude, v.longitude);
+                }
+                if (dest == null) {
+                  _showError(
+                    'No hay destino actual para proponer alternativas.',
+                  );
+                  return;
+                }
+                await _proposeAlternativesToLatLng(dest);
+                return;
+              }
+              if (value == 'start_now') {
+                _startVerificationForCurrent();
+                return;
+              }
               if (value == 'route_planner') {
                 await _openRoutePlanner();
                 return;
@@ -982,6 +2144,19 @@ class _MapScreenState extends State<MapScreen> {
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(value: 'settings', child: Text('Ajustes')),
+              PopupMenuItem(
+                value: 'today_schedule',
+                child: Text('Programación de hoy'),
+              ),
+              PopupMenuItem(
+                value: 'alternatives_current',
+                child: Text('Ver alternativas al destino actual'),
+              ),
+              PopupMenuItem(
+                value: 'start_now',
+                child: Text('Iniciar verificación ahora'),
+              ),
               PopupMenuItem(
                 value: 'route_planner',
                 child: Text('Planificar ruta'),
@@ -1022,7 +2197,7 @@ class _MapScreenState extends State<MapScreen> {
                 additionalOptions: MapboxConfig.isConfigured
                     ? {
                         'accessToken': MapboxConfig.accessToken,
-                        'styleId': MapboxConfig.styleId,
+                        'styleId': _activeStyleId(),
                       }
                     : const <String, String>{},
                 userAgentPackageName: 'com.example.flutter_application_1',
@@ -1062,7 +2237,9 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ],
                 ),
-              if (_activeRoute != null && _activeRoute!.coordinates.isNotEmpty)
+              if (_activeRoute != null &&
+                  _activeRoute!.coordinates.isNotEmpty &&
+                  !_arrivalConfirmed)
                 PolylineLayer(
                   polylines: [
                     Polyline(
@@ -1087,6 +2264,9 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ],
                 ),
+
+              //),
+              //),
               if (_showingHistory && _route.isNotEmpty)
                 MarkerLayer(
                   markers: [
@@ -1113,6 +2293,20 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
             ],
+          ),
+          // Botón de capas (abre selector)
+          Positioned(
+            top:
+                (_activeRoute != null || (_showingHistory && _route.isNotEmpty))
+                ? 120
+                : 16,
+            left: 16,
+            child: FloatingActionButton.small(
+              heroTag: null,
+              onPressed: _openLayersSelector,
+              tooltip: 'Capas del mapa',
+              child: const Icon(Icons.layers),
+            ),
           ),
           if (_showingHistory && _route.isNotEmpty)
             Positioned(
@@ -1153,64 +2347,58 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          if (_activeRoute != null)
+          if (_activeRoute != null &&
+              !_routeInProgress &&
+              !_arrivalConfirmed &&
+              !_dwellInProgress)
             Positioned(
-              top: 16,
+              bottom: 20,
+              right: 16,
+              child: ElevatedButton.icon(
+                onPressed: _markRouteStarted,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Iniciar recorrido'),
+              ),
+            ),
+          // Overlay de espera con cuenta regresiva y acción manual
+          if (_dwellInProgress && _dwellEndsAt != null)
+            Positioned(
+              bottom: 20,
               left: 16,
               right: 16,
               child: Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Ruta calculada (${_routingMode == RoutingMode.walking ? 'Caminar' : 'Conducir'})',
-                        style: Theme.of(context).textTheme.titleMedium,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('En espera en el destino'),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Tiempo restante: ${_formatRemaining(_dwellEndsAt!)} • Radio: ${_arrivalRadiusMeters.toStringAsFixed(0)} m',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Distancia: ${(_activeRoute!.distanceMeters / 1000).toStringAsFixed(2)} km • Tiempo: ${(_activeRoute!.durationSeconds / 60).toStringAsFixed(0)} min',
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton.icon(
-                            onPressed: _showRouteSteps,
-                            icon: const Icon(Icons.list_alt),
-                            label: const Text('Ver pasos'),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton.icon(
-                            onPressed: _showRouteLegs,
-                            icon: const Icon(Icons.route),
-                            label: const Text('Ver tramos'),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton.icon(
-                            onPressed: _startExternalNavigation,
-                            icon: const Icon(Icons.navigation),
-                            label: const Text('Iniciar'),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton.icon(
-                            onPressed: _shareActiveRoute,
-                            icon: const Icon(Icons.share),
-                            label: const Text('Compartir'),
-                          ),
-                        ],
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: _startVerificationForCurrent,
+                        child: const Text('Iniciar ahora'),
                       ),
                     ],
                   ),
                 ),
               ),
-          ),
-          if (_isLoading) const Center(child: _AnimatedLoading()),
+            ),
           // Controles de zoom (+/-)
           Positioned(
-            bottom: 20,
+            bottom: _dwellInProgress ? 100 : 20,
             left: 16,
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1231,47 +2419,36 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
           ),
-          if (_activeRoute != null)
+
+          // Quick manual controls: mark arrival or start verification now
+          if (!_dwellInProgress)
             Positioned(
-              bottom: 20,
+              bottom: 88,
               right: 16,
-              child: ElevatedButton.icon(
-                onPressed: _startExternalNavigation,
-                icon: const Icon(Icons.navigation),
-                label: const Text('Iniciar'),
-              ),
-            ),
-          if (_selectingOnMap)
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: Card(
-                color: Colors.black87,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Toca o mantén presionado el mapa para añadir un destino',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setState(() => _selectingOnMap = false);
-                        },
-                        child: const Text('Cancelar'),
-                      ),
-                    ],
-                  ),
+              child: FloatingActionButton.small(
+                heroTag: null,
+                onPressed: () {
+                  if (_isInsideArrivalZoneNow() && !_arrivalConfirmed) {
+                    _promptArrivalConfirmation(_center);
+                  } else {
+                    _startVerificationForCurrent();
+                  }
+                },
+                tooltip: _isInsideArrivalZoneNow() && !_arrivalConfirmed
+                    ? 'Marcar llegada'
+                    : 'Iniciar verificación ahora',
+                child: Icon(
+                  _isInsideArrivalZoneNow() && !_arrivalConfirmed
+                      ? Icons.flag
+                      : Icons.play_arrow,
                 ),
               ),
             ),
           if (_shutdownMessage != null)
             Positioned.fill(
+              //top: 16,
+              //left: 16,
+              //right: 16,
               child: Container(
                 color: Colors.black54,
                 alignment: Alignment.center,
@@ -1537,6 +2714,19 @@ class _MapScreenState extends State<MapScreen> {
                               () => localMode = RoutingMode.driving,
                             );
                             setState(() => _routingMode = RoutingMode.driving);
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('Conducir (tráfico)'),
+                          selected: localMode == RoutingMode.drivingTraffic,
+                          onSelected: (_) {
+                            setSheetState(
+                              () => localMode = RoutingMode.drivingTraffic,
+                            );
+                            setState(
+                              () => _routingMode = RoutingMode.drivingTraffic,
+                            );
                           },
                         ),
                       ],

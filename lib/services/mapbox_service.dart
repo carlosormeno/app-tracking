@@ -15,7 +15,7 @@ class MapboxServiceException implements Exception {
   String toString() => 'MapboxServiceException: $message';
 }
 
-enum RoutingMode { walking, driving }
+enum RoutingMode { walking, driving, drivingTraffic }
 
 class MapboxService {
   MapboxService({http.Client? client, String? accessToken})
@@ -96,8 +96,17 @@ class MapboxService {
         '${point.latitude},${point.longitude}';
   }
 
-  String _profile(RoutingMode mode) =>
-      mode == RoutingMode.walking ? 'walking' : 'driving';
+  String _profile(RoutingMode mode) {
+    switch (mode) {
+      case RoutingMode.walking:
+        return 'walking';
+      case RoutingMode.drivingTraffic:
+        return 'driving-traffic';
+      case RoutingMode.driving:
+      default:
+        return 'driving';
+    }
+  }
 
   Future<RouteResult> directions({
     required RoutingMode mode,
@@ -113,12 +122,50 @@ class MapboxService {
       'https://api.mapbox.com/directions/v5/mapbox/${_profile(mode)}/$coords'
       '?alternatives=false&geometries=geojson&steps=true&overview=full&access_token=${_token}',
     );
-    final resp = await _client.get(uri);
+    var resp = await _client.get(uri);
+    if (resp.statusCode != 200 && mode == RoutingMode.drivingTraffic) {
+      // Fallback a driving si el plan no soporta tráfico
+      final fallback = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/driving/$coords'
+        '?alternatives=false&geometries=geojson&steps=true&overview=full&access_token=${_token}',
+      );
+      resp = await _client.get(fallback);
+    }
     if (resp.statusCode != 200) {
-      throw MapboxServiceException(
-          'Fallo directions (${resp.statusCode}): ${resp.body}');
+      throw MapboxServiceException('Fallo directions (${resp.statusCode}): ${resp.body}');
     }
     return _parseDirections(resp.body);
+  }
+
+  Future<List<RouteResult>> directionsAlternatives({
+    required RoutingMode mode,
+    required LatLng origin,
+    required LatLng destination,
+    int maxAlternatives = 4,
+  }) async {
+    final coords = [origin, destination]
+        .map((p) => '${p.longitude.toStringAsFixed(6)},${p.latitude.toStringAsFixed(6)}')
+        .join(';');
+    final uri = Uri.parse(
+      'https://api.mapbox.com/directions/v5/mapbox/${_profile(mode)}/$coords'
+      '?alternatives=true&geometries=geojson&steps=true&overview=full&access_token=${_token}',
+    );
+    var resp = await _client.get(uri);
+    if (resp.statusCode != 200 && mode == RoutingMode.drivingTraffic) {
+      final fallback = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/driving/$coords'
+        '?alternatives=true&geometries=geojson&steps=true&overview=full&access_token=${_token}',
+      );
+      resp = await _client.get(fallback);
+    }
+    if (resp.statusCode != 200) {
+      throw MapboxServiceException('Fallo directions alternativas (${resp.statusCode}): ${resp.body}');
+    }
+    final list = _parseDirectionsList(resp.body);
+    if (list.isEmpty) {
+      throw MapboxServiceException('Sin rutas alternativas');
+    }
+    return list.take(maxAlternatives).toList();
   }
 
   Future<RouteResult> optimize({
@@ -142,55 +189,67 @@ class MapboxService {
       if (destinationLast) 'destination': 'last',
     };
     final qs = params.entries.map((e) => '${e.key}=${e.value}').join('&');
-    final uri = Uri.parse(
-        'https://api.mapbox.com/optimized-trips/v1/mapbox/${_profile(mode)}/$coords?$qs');
-    final resp = await _client.get(uri);
+    final uri = Uri.parse('https://api.mapbox.com/optimized-trips/v1/mapbox/${_profile(mode)}/$coords?$qs');
+    var resp = await _client.get(uri);
+    if (resp.statusCode != 200 && mode == RoutingMode.drivingTraffic) {
+      final fallback = Uri.parse('https://api.mapbox.com/optimized-trips/v1/mapbox/driving/$coords?$qs');
+      resp = await _client.get(fallback);
+    }
     if (resp.statusCode != 200) {
-      throw MapboxServiceException(
-          'Fallo optimization (${resp.statusCode}): ${resp.body}');
+      throw MapboxServiceException('Fallo optimization (${resp.statusCode}): ${resp.body}');
     }
     return _parseOptimization(resp.body);
   }
 
   RouteResult _parseDirections(String body) {
+    final list = _parseDirectionsList(body);
+    if (list.isEmpty) {
+      throw MapboxServiceException('Sin rutas');
+    }
+    return list.first;
+  }
+
+  List<RouteResult> _parseDirectionsList(String body) {
     final data = jsonDecode(body) as Map<String, dynamic>;
     final routes = data['routes'] as List<dynamic>?;
     if (routes == null || routes.isEmpty) {
-      throw MapboxServiceException('Sin rutas');
+      return const <RouteResult>[];
     }
-    final r = routes.first as Map<String, dynamic>;
-    final geometry = r['geometry'] as Map<String, dynamic>;
-    final coords = (geometry['coordinates'] as List<dynamic>)
-        .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
-        .toList();
-    final legs = (r['legs'] as List<dynamic>? ?? []);
-    final steps = <RouteStepInfo>[];
-    final legInfos = <RouteLegInfo>[];
-    for (final leg in legs) {
-      final l = leg as Map<String, dynamic>;
-      legInfos.add(RouteLegInfo(
-        distanceMeters: (l['distance'] as num?)?.toDouble() ?? 0,
-        durationSeconds: (l['duration'] as num?)?.toDouble() ?? 0,
-      ));
-      final s = (l['steps'] as List<dynamic>? ?? []);
-      for (final st in s) {
-        final m = st as Map<String, dynamic>;
-        final maneuver = (m['maneuver'] as Map<String, dynamic>? ?? {});
-        final instruction = (maneuver['instruction'] as String?) ?? '';
-        steps.add(RouteStepInfo(
-          instruction: instruction,
-          distanceMeters: (m['distance'] as num?)?.toDouble() ?? 0,
-          durationSeconds: (m['duration'] as num?)?.toDouble() ?? 0,
+    return routes.map((route) {
+      final r = route as Map<String, dynamic>;
+      final geometry = r['geometry'] as Map<String, dynamic>;
+      final coords = (geometry['coordinates'] as List<dynamic>)
+          .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+          .toList();
+      final legs = (r['legs'] as List<dynamic>? ?? []);
+      final steps = <RouteStepInfo>[];
+      final legInfos = <RouteLegInfo>[];
+      for (final leg in legs) {
+        final l = leg as Map<String, dynamic>;
+        legInfos.add(RouteLegInfo(
+          distanceMeters: (l['distance'] as num?)?.toDouble() ?? 0,
+          durationSeconds: (l['duration'] as num?)?.toDouble() ?? 0,
         ));
+        final s = (l['steps'] as List<dynamic>? ?? []);
+        for (final st in s) {
+          final m = st as Map<String, dynamic>;
+          final maneuver = (m['maneuver'] as Map<String, dynamic>? ?? {});
+          final instruction = (maneuver['instruction'] as String?) ?? '';
+          steps.add(RouteStepInfo(
+            instruction: instruction,
+            distanceMeters: (m['distance'] as num?)?.toDouble() ?? 0,
+            durationSeconds: (m['duration'] as num?)?.toDouble() ?? 0,
+          ));
+        }
       }
-    }
-    return RouteResult(
-      coordinates: coords,
-      distanceMeters: (r['distance'] as num?)?.toDouble() ?? 0,
-      durationSeconds: (r['duration'] as num?)?.toDouble() ?? 0,
-      steps: steps,
-      legs: legInfos,
-    );
+      return RouteResult(
+        coordinates: coords,
+        distanceMeters: (r['distance'] as num?)?.toDouble() ?? 0,
+        durationSeconds: (r['duration'] as num?)?.toDouble() ?? 0,
+        steps: steps,
+        legs: legInfos,
+      );
+    }).toList();
   }
 
   RouteResult _parseOptimization(String body) {
