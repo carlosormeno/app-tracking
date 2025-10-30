@@ -24,13 +24,17 @@ class Constants {
     }
     if (Platform.isAndroid) {
       //Emulador Android: 10.0.2.2 hace NAT hacia localhost de la máquina
-      //return 'http://10.0.2.2:8080/api';
+      return 'http://10.0.2.2:8080/api';
       //return 'http://172.20.10.2:8080/api';
       //return 'http://192.168.137.1:8080/api'; //Para red compartida, PC de Carlos
-      return 'http://172.16.14.40:8080/api'; //Contenedor en WSL
+      //return 'http://172.16.14.40:8080/api'; //Contenedor en WSL
       //return 'http://10.50.130.97:8080/api'; //Para red compartida, laptop de Segundo, sin cable de red
       //return 'http://172.16.14.236:8080/api'; //Para red compartida, laptop de Segundo, con cable de red
     }
     return 'http://localhost:8080/api';
   }
+
+  /// Mostrar un preview del token SAA en UI para pruebas.
+  /// Puede activarse/desactivarse en runtime si se recompila, o cambiarlo aquí.
+  static const bool showAuthTokenPreview = true; // poner en false para ocultar
 }

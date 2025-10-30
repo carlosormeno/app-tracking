@@ -1,8 +1,8 @@
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
+// import 'package:firebase_auth/firebase_auth.dart'; // Comentado: se migra a SAA
+// import 'package:firebase_core/firebase_core.dart'; // Comentado
 import 'package:flutter/material.dart';
 
-import 'firebase_options.dart';
+// import 'firebase_options.dart'; // Comentado mientras se prueba SAA
 import 'screens/login_screen.dart';
 import 'screens/map_screen.dart';
 import 'screens/splash_screen.dart';
@@ -25,12 +25,11 @@ Future<void> main() async {
   }
 
   try {
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-      );
-    logDebug('Firebase inicializado correctamente');
+    // Firebase.initializeApp(...) // Comentado temporalmente: usando SAA
+    await AuthService().restoreSession();
+    logDebug('Sesión SAA restaurada (si existía)');
   } catch (e, stack) {
-    logError('Error inicializando Firebase', error: e, stackTrace: stack);
+    logError('Error restaurando sesión SAA', error: e, stackTrace: stack);
   }
 
   runApp(const LocationTrackerApp());

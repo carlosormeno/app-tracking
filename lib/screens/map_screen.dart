@@ -6,6 +6,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart';
 import '../config/mapbox_config.dart';
+import '../config/constants.dart';
 import '../models/location_point.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -187,6 +188,19 @@ class _MapScreenState extends State<MapScreen> {
         logDebug('No se pudo obtener ID token de Firebase');
       }
       await _apiService.updateAuthToken(token);
+      if (mounted && token != null && token.isNotEmpty && Constants.showAuthTokenPreview) {
+        final preview = token.length > 80 ? '${token.substring(0, 80)}…' : token;
+        // Mostrar después del primer frame para asegurar que exista un Scaffold
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Token SAA: $preview'),
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        });
+      }
       setState(() {
         _firebaseUid = uid;
         _email = email;
@@ -1709,8 +1723,23 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _openTodaySchedule() async {
     if (_todayVisits.isEmpty) {
-      _showError('No hay programación cargada.');
-      return;
+      // Si el usuario eligió "Más tarde" previamente, no se cargó la lista.
+      // Cargarla ahora para mostrar la pantalla.
+      try {
+        var visits = await MockScheduleService().fetchTodayVisits();
+        final uid = _firebaseUid;
+        if (uid != null) {
+          visits = await _applySavedOrder(uid, visits);
+        }
+        if (visits.isEmpty) {
+          _showError('No hay programación disponible para hoy.');
+          return;
+        }
+        setState(() => _todayVisits = visits);
+      } catch (e) {
+        _showError('No se pudo cargar la programación: $e');
+        return;
+      }
     }
     final updated = await Navigator.of(context).push<List<AssignedVisit>>(
       MaterialPageRoute(
@@ -2089,6 +2118,14 @@ class _MapScreenState extends State<MapScreen> {
               _bootstrap();
             },
           ),
+          if (IdentityService().hasPermiso('movil.programacionhoy'))
+            IconButton(
+              icon: const Icon(Icons.today),
+              tooltip: 'Programación de hoy',
+              onPressed: () async {
+                await _openTodaySchedule();
+              },
+            ),
           PopupMenuButton<String>(
             onSelected: (value) async {
               if (value == 'settings') {
@@ -2140,38 +2177,76 @@ class _MapScreenState extends State<MapScreen> {
                   }
                 }
                 await _apiService.updateAuthToken(null);
-                await AuthService().signOut();
+                final res = await AuthService().signOutSaa();
+                if (mounted) {
+                  Color bg;
+                  String text;
+                  switch (res.resultado) {
+                    case '1':
+                      bg = Colors.green; // Sesión Cerrada
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Sesión Cerrada';
+                      break;
+                    case '2':
+                      bg = Colors.red; // Sesión no Cerrada
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Sesión no Cerrada';
+                      break;
+                    case '3':
+                      bg = Colors.amber; // Token vacío
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'El token debe ser distinto de vacío';
+                      break;
+                    case '5':
+                      bg = Colors.deepOrange; // Token inválido
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Token inválido';
+                      break;
+                    case '6':
+                      bg = Colors.deepOrange; // Token expirado
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Token expirado';
+                      break;
+                    case '4':
+                    default:
+                      bg = Colors.red; // ERROR u otro
+                      text = res.mensaje.isNotEmpty ? res.mensaje : 'ERROR al cerrar sesión';
+                  }
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('[' + res.resultado + '] ' + text),
+                      backgroundColor: bg,
+                      duration: const Duration(seconds: 3),
+                    ),
+                  );
+                }
               }
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'settings', child: Text('Ajustes')),
-              PopupMenuItem(
-                value: 'today_schedule',
-                child: Text('Programación de hoy'),
-              ),
-              PopupMenuItem(
-                value: 'alternatives_current',
-                child: Text('Ver alternativas al destino actual'),
-              ),
-              PopupMenuItem(
-                value: 'start_now',
-                child: Text('Iniciar verificación ahora'),
-              ),
-              PopupMenuItem(
-                value: 'route_planner',
-                child: Text('Planificar ruta'),
-              ),
-              PopupMenuItem(
-                value: 'history',
-                child: Text('Ver historial por fecha'),
-              ),
-              PopupMenuItem(
-                value: 'history_range',
-                child: Text('Ver historial por rango'),
-              ),
-              PopupMenuDivider(),
-              PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')),
-            ],
+            itemBuilder: (context) {
+              final id = IdentityService();
+              final items = <PopupMenuEntry<String>>[];
+              if (id.hasPermiso('movil.ajustes')) {
+                items.add(const PopupMenuItem(value: 'settings', child: Text('Ajustes')));
+              }
+              if (id.hasPermiso('movil.programacionhoy')) {
+                items.add(const PopupMenuItem(value: 'today_schedule', child: Text('Programación de hoy')));
+              }
+              if (id.hasPermiso('movil.opcionesdestactual')) {
+                items.add(const PopupMenuItem(value: 'alternatives_current', child: Text('Ver alternativas al destino actual')));
+              }
+              if (id.hasPermiso('movil.iniciarverif')) {
+                items.add(const PopupMenuItem(value: 'start_now', child: Text('Iniciar verificación ahora')));
+              }
+              if (id.hasPermiso('movil.planruta')) {
+                items.add(const PopupMenuItem(value: 'route_planner', child: Text('Planificar ruta')));
+              }
+              if (id.hasPermiso('movil.histxfecha')) {
+                items.add(const PopupMenuItem(value: 'history', child: Text('Ver historial por fecha')));
+              }
+              if (id.hasPermiso('movil.histxrango')) {
+                items.add(const PopupMenuItem(value: 'history_range', child: Text('Ver historial por rango')));
+              }
+              if (items.isNotEmpty) {
+                items.add(const PopupMenuDivider());
+              }
+              items.add(const PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')));
+              return items;
+            },
           ),
         ],
       ),

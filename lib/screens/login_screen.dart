@@ -12,9 +12,9 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _usuarioController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
-  bool _isRegisterMode = false;
+  bool _isRegisterMode = false; // Comentado conceptualmente: SSO no registra
   bool _isLoading = false;
   String? _errorMessage;
   bool _showPassword = false;
@@ -31,21 +31,21 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _loadRememberedUser() async {
     final prefs = await SharedPreferences.getInstance();
     final remember = prefs.getBool('remember_user') ?? false;
-    String? email;
+    String? usuario;
     if (remember) {
-      email = prefs.getString('remembered_email');
+      usuario = prefs.getString('remembered_usuario');
     }
     if (mounted) {
       setState(() {
         _rememberUser = remember;
-        if (email != null && email.isNotEmpty) {
-          _emailController.text = email;
+        if (usuario != null && usuario.isNotEmpty) {
+          _usuarioController.text = usuario;
         }
       });
     } else {
       _rememberUser = remember;
-      if (email != null && email.isNotEmpty) {
-        _emailController.text = email;
+      if (usuario != null && usuario.isNotEmpty) {
+        _usuarioController.text = usuario;
       }
     }
   }
@@ -55,23 +55,23 @@ class _LoginScreenState extends State<LoginScreen> {
     await prefs.setBool('remember_user', value);
     if (!value) {
       // Si el usuario desactiva "Recordar", limpiar email almacenado
-      await prefs.remove('remembered_email');
+      await prefs.remove('remembered_usuario');
     }
   }
 
   @override
   void dispose() {
-    _emailController.dispose();
+    _usuarioController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
-    final email = _emailController.text.trim();
+    final usuario = _usuarioController.text.trim();
     final password = _passwordController.text.trim();
 
-    if (email.isEmpty || password.isEmpty) {
-      setState(() => _errorMessage = 'Ingresa email y contraseña');
+    if (usuario.isEmpty || password.isEmpty) {
+      setState(() => _errorMessage = 'Ingresa usuario y contraseña');
       return;
     }
 
@@ -81,21 +81,27 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      if (_isRegisterMode) {
-        logDebug('Registrando usuario en Firebase', details: email);
-        await _authService.register(email: email, password: password);
-      } else {
-        logDebug('Iniciando sesión en Firebase', details: email);
-        await _authService.signIn(email: email, password: password);
-      }
+      // Autenticación SAA (codigoSistema en duro)
+      logDebug('Iniciando sesión en SAA', details: usuario);
+      await _authService.signInSaa(usuario: usuario, contrasena: password);
 
-      // Persistir preferencia de recordar usuario y email
+      // Persistir preferencia de recordar usuario
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('remember_user', _rememberUser);
       if (_rememberUser) {
-        await prefs.setString('remembered_email', email);
+        await prefs.setString('remembered_usuario', usuario);
       } else {
-        await prefs.remove('remembered_email');
+        await prefs.remove('remembered_usuario');
+      }
+
+      // Mostrar token obtenido (vista previa truncada)
+      final token = AuthService().currentSession?.token;
+      if (mounted && token != null && token.isNotEmpty) {
+        final preview = token.length > 40 ? '${token.substring(0, 40)}…' : token;
+        // ignore: use_build_context_synchronously
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Token SAA obtenido: $preview')),
+        );
       }
     } on Exception catch (e) {
       logError('Error en autenticación', error: e);
@@ -111,7 +117,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isRegisterMode ? 'Crear cuenta' : 'Iniciar sesión'),
+        title: const Text('Iniciar sesión'),
       ),
       body: SafeArea(
         child: LayoutBuilder(
@@ -131,9 +137,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
             TextField(
-              controller: _emailController,
-              keyboardType: TextInputType.emailAddress,
-              decoration: const InputDecoration(labelText: 'Email'),
+              controller: _usuarioController,
+              decoration: const InputDecoration(labelText: 'Usuario'),
             ),
             const SizedBox(height: 16),
             TextField(
@@ -192,20 +197,8 @@ class _LoginScreenState extends State<LoginScreen> {
                     : Text(_isRegisterMode ? 'Registrarme' : 'Ingresar'),
               ),
             ),
-            TextButton(
-              onPressed: _isLoading
-                  ? null
-                  : () {
-                      setState(() {
-                        _isRegisterMode = !_isRegisterMode;
-                        _errorMessage = null;
-                      });
-                    },
-              child: Text(_isRegisterMode
-                  ? '¿Ya tienes cuenta? Inicia sesión'
-                  : 'Crear una cuenta nueva'),
-            )
-                  ],
+            // Registro deshabilitado: flujo SSO
+          ],
                 ),
               ),
             );

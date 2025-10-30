@@ -1,4 +1,4 @@
-import 'package:firebase_auth/firebase_auth.dart';
+// import 'package:firebase_auth/firebase_auth.dart'; // Comentado: migrando a SAA
 import 'package:flutter/material.dart';
 
 import '../services/auth_service.dart';
@@ -10,7 +10,8 @@ class AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
+    return StreamBuilder(
+      // Stream<UserSession?>
       stream: AuthService().authStateChanges,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
@@ -18,7 +19,7 @@ class AuthGate extends StatelessWidget {
             body: Center(child: CircularProgressIndicator()),
           );
         }
-        if (snapshot.hasData) {
+        if (snapshot.hasData && snapshot.data != null) {
           return const MapScreen();
         }
         return const LoginScreen();
@@ -26,4 +27,3 @@ class AuthGate extends StatelessWidget {
     );
   }
 }
-
