@@ -24,20 +24,22 @@ class ForegroundServiceManager {
         channelDescription: 'Mantiene el tracking activo en segundo plano',
         channelImportance: NotificationChannelImportance.HIGH,
         priority: NotificationPriority.HIGH,
-        iconData: const NotificationIconData(
-          resType: ResourceType.mipmap,
-          resPrefix: ResourcePrefix.ic,
-          name: 'launcher',
-        ),
-        buttons: const [NotificationButton(id: 'stop', text: 'Detener')],
+        //iconData: const NotificationIconData(
+        //  resType: ResourceType.mipmap,
+        //  resPrefix: ResourcePrefix.ic,
+        //  name: 'launcher',
+        //),
+        //buttons: const [NotificationButton(id: 'stop', text: 'Detener')],
       ),
       iosNotificationOptions: const IOSNotificationOptions(
         showNotification: true,
         playSound: false,
       ),
-      foregroundTaskOptions: const ForegroundTaskOptions(
-        interval: 60000,
-        isOnceEvent: false,
+      //foregroundTaskOptions: const ForegroundTaskOptions(
+      foregroundTaskOptions: ForegroundTaskOptions(
+        //interval: 60000,
+        //isOnceEvent: false,
+        eventAction: ForegroundTaskEventAction.repeat(60000),
         autoRunOnBoot: true,
         allowWakeLock: true,
         allowWifiLock: true,
@@ -58,6 +60,18 @@ class ForegroundServiceManager {
     await FlutterForegroundTask.startService(
       notificationTitle: 'Sistema activo',
       notificationText: 'La app está registrando tu ubicación',
+      notificationIcon: null,
+      // ✅ AGREGA estos parámetros aquí:
+      /*notificationIcon: const AndroidNotificationIcon(
+        //resType: ResourceType.mipmap,
+        //resPrefix: ResourcePrefix.ic,
+        resourceType: NotificationResourceType.mipmap,
+        name: 'launcher',
+      ),*/
+      notificationButtons: const [
+        NotificationButton(id: 'stop', text: 'Detener'),
+      ],
+
       callback: startCallback,
     );
   }
@@ -79,13 +93,15 @@ class LocationTaskHandler extends TaskHandler {
   final Battery _battery = Battery();
 
   @override
-  Future<void> onStart(DateTime timestamp, SendPort? sendPort) async {
+  //Future<void> onStart(DateTime timestamp, SendPort? sendPort) async {
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     logDebug('Foreground task iniciado');
     await _updateNotification();
   }
 
   @override
-  Future<void> onRepeatEvent(DateTime timestamp, SendPort? sendPort) async {
+  //Future<void> onRepeatEvent(DateTime timestamp, SendPort? sendPort) async {
+  Future<void> onRepeatEvent(DateTime timestamp) async {
     logDebug('Foreground task tick ${timestamp.toIso8601String()}');
     await _updateNotification();
   }
@@ -109,7 +125,10 @@ class LocationTaskHandler extends TaskHandler {
   }
 
   @override
-  Future<void> onDestroy(DateTime timestamp, SendPort? sendPort) async {}
+  //Future<void> onDestroy(DateTime timestamp, SendPort? sendPort) async {}
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    logDebug('Foreground task destruido (timeout: $isTimeout)');
+  }
 
   @override
   void onNotificationButtonPressed(String id) {

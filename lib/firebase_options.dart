@@ -1,4 +1,4 @@
-import 'package:firebase_core/firebase_core.dart';
+/*import 'package:firebase_core/firebase_core.dart';
 
 /// Archivo placeholder: reemplaza los valores con los generados por
 /// `flutterfire configure`.
@@ -12,4 +12,4 @@ class DefaultFirebaseOptions {
     storageBucket: 'app-mirror-9c467.firebasestorage.app',
     measurementId: 'G-MMBN8K53MJ',
   );
-}
+}*/

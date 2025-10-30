@@ -188,8 +188,13 @@ class _MapScreenState extends State<MapScreen> {
         logDebug('No se pudo obtener ID token de Firebase');
       }
       await _apiService.updateAuthToken(token);
-      if (mounted && token != null && token.isNotEmpty && Constants.showAuthTokenPreview) {
-        final preview = token.length > 80 ? '${token.substring(0, 80)}…' : token;
+      if (mounted &&
+          token != null &&
+          token.isNotEmpty &&
+          Constants.showAuthTokenPreview) {
+        final preview = token.length > 80
+            ? '${token.substring(0, 80)}…'
+            : token;
         // Mostrar después del primer frame para asegurar que exista un Scaffold
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
@@ -1916,7 +1921,7 @@ class _MapScreenState extends State<MapScreen> {
     final placemarks = await placemarkFromCoordinates(
       point.latitude,
       point.longitude,
-      localeIdentifier: 'es',
+      //localeIdentifier: 'es',
     );
     if (placemarks.isEmpty) {
       return _formatCoordinates(point);
@@ -2184,28 +2189,40 @@ class _MapScreenState extends State<MapScreen> {
                   switch (res.resultado) {
                     case '1':
                       bg = Colors.green; // Sesión Cerrada
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Sesión Cerrada';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'Sesión Cerrada';
                       break;
                     case '2':
                       bg = Colors.red; // Sesión no Cerrada
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Sesión no Cerrada';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'Sesión no Cerrada';
                       break;
                     case '3':
                       bg = Colors.amber; // Token vacío
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'El token debe ser distinto de vacío';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'El token debe ser distinto de vacío';
                       break;
                     case '5':
                       bg = Colors.deepOrange; // Token inválido
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Token inválido';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'Token inválido';
                       break;
                     case '6':
                       bg = Colors.deepOrange; // Token expirado
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'Token expirado';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'Token expirado';
                       break;
                     case '4':
                     default:
                       bg = Colors.red; // ERROR u otro
-                      text = res.mensaje.isNotEmpty ? res.mensaje : 'ERROR al cerrar sesión';
+                      text = res.mensaje.isNotEmpty
+                          ? res.mensaje
+                          : 'ERROR al cerrar sesión';
                   }
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -2221,30 +2238,70 @@ class _MapScreenState extends State<MapScreen> {
               final id = IdentityService();
               final items = <PopupMenuEntry<String>>[];
               if (id.hasPermiso('movil.ajustes')) {
-                items.add(const PopupMenuItem(value: 'settings', child: Text('Ajustes')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'settings',
+                    child: Text('Ajustes'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.programacionhoy')) {
-                items.add(const PopupMenuItem(value: 'today_schedule', child: Text('Programación de hoy')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'today_schedule',
+                    child: Text('Programación de hoy'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.opcionesdestactual')) {
-                items.add(const PopupMenuItem(value: 'alternatives_current', child: Text('Ver alternativas al destino actual')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'alternatives_current',
+                    child: Text('Ver alternativas al destino actual'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.iniciarverif')) {
-                items.add(const PopupMenuItem(value: 'start_now', child: Text('Iniciar verificación ahora')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'start_now',
+                    child: Text('Iniciar verificación ahora'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.planruta')) {
-                items.add(const PopupMenuItem(value: 'route_planner', child: Text('Planificar ruta')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'route_planner',
+                    child: Text('Planificar ruta'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.histxfecha')) {
-                items.add(const PopupMenuItem(value: 'history', child: Text('Ver historial por fecha')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'history',
+                    child: Text('Ver historial por fecha'),
+                  ),
+                );
               }
               if (id.hasPermiso('movil.histxrango')) {
-                items.add(const PopupMenuItem(value: 'history_range', child: Text('Ver historial por rango')));
+                items.add(
+                  const PopupMenuItem(
+                    value: 'history_range',
+                    child: Text('Ver historial por rango'),
+                  ),
+                );
               }
               if (items.isNotEmpty) {
                 items.add(const PopupMenuDivider());
               }
-              items.add(const PopupMenuItem(value: 'logout', child: Text('Cerrar sesión')));
+              items.add(
+                const PopupMenuItem(
+                  value: 'logout',
+                  child: Text('Cerrar sesión'),
+                ),
+              );
               return items;
             },
           ),
